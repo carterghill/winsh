@@ -1,0 +1,10 @@
+[package]
+name = "winsh"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A native Windows shell with Bash-compatible syntax."
+publish = false
+
+[lints.rust]
+unsafe_code = "deny"

@@ -13,10 +13,10 @@ does not by itself make every Linux script portable.
 
 ## Structure
 
-Start with one Cargo package and one executable. As shell behavior arrives, add
-`src/lib.rs` in the same package to hold the engine; keep `main.rs` responsible for
-arguments, input, diagnostics, and the final process exit code. This lets a later
-terminal reuse the engine without introducing a workspace today.
+Use one Cargo package with an executable and engine library. `src/lib.rs` exposes
+the implemented syntax API; `main.rs` handles the executable's arguments and exit
+code. Input and user-facing diagnostics will also belong to the frontend. This
+lets a later terminal reuse the engine without introducing a workspace today.
 
 Create modules when their first behavior is implemented, using these boundaries:
 
@@ -57,8 +57,9 @@ actually need.
 
 ## Implementation order
 
-1. Parse simple commands with Bash quoting and escaping; preserve syntax needed
-   for later expansion. Add focused parser tests.
+1. **Implemented:** parse simple command words with Bash quoting and escaping,
+   preserve syntax needed for later expansion, and test parser behavior. See the
+   [syntax notes](syntax.md) for the supported subset and remaining grammar work.
 2. Add shell state, `pwd`, `cd`, `exit`, and foreground native process execution.
    Test paths containing spaces, arguments, environment, and exit statuses.
 3. Add redirections and pipelines with streaming I/O and correct process cleanup.

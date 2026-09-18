@@ -8,7 +8,7 @@ Options:
   -h, --help     Show this help
   -V, --version  Show the version
 
-Project scaffold only. Interactive commands and script execution are not implemented yet.";
+Interactive commands and script execution are not implemented yet.";
 
 fn main() -> ExitCode {
     let mut args = env::args_os().skip(1);

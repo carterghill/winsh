@@ -6,5 +6,8 @@ rust-version = "1.88"
 description = "A native Windows shell with Bash-compatible syntax."
 publish = false
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Diagnostics_Debug"] }
+
 [lints.rust]
 unsafe_code = "deny"

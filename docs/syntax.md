@@ -49,7 +49,8 @@ and single-quoted text retain their literal meaning. `~`, glob patterns, simple
 parameter references, and brace patterns are preserved without evaluation.
 Adjacent text across a removed continuation is joined, with its source range
 still covering the original continuation. Quote groups remain separate, even
-when empty. No production API flattens this structure into executable arguments.
+when empty. The shell's separate expansion stage constructs executable arguments
+from this structure, keeping the parser independent of shell state.
 
 ## Current limits
 
@@ -62,11 +63,17 @@ not a general Bash syntax validator; array assignments, contextual reserved-word
 rules, aliases, history expansion, and compound commands remain future work.
 
 Unclosed quotes and a trailing backslash return an error for which
-`is_incomplete()` is true, so a future interactive reader can request more input.
+`is_incomplete()` is true, so the interactive reader can request more input.
 The trailing-backslash rule is a streaming-input convention: Bash may accept it
 literally at the end of a completed script. NUL bytes are rejected. The parser
 does not normalize CRLF: CR remains word content, and LF is the line separator.
-Any Windows script line-ending policy belongs in the future input layer.
+The CLI input loop normalizes CRLF to LF, including within multiline quoted
+input. The parser API and `-c` command text preserve the supplied source.
+
+The [working shell](shell.md) evaluates literal words and leading `~`/`~/`.
+Parameter, wildcard, and brace expansion markers preserved by this parser
+currently produce explicit errors during expansion. Quoted or escaped literal
+markers remain usable.
 
 Windows paths follow the same quoting rules. Use `'C:\Program Files\winsh'` or
 `C:/Users/Carter` to preserve path characters. An unquoted `C:\temp` becomes

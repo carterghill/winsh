@@ -82,7 +82,7 @@ Windows paths follow the same quoting rules. Use `'C:\Program Files\winsh'` or
 ## Tests
 
 ```powershell
-cargo test --locked --offline --all-targets
+cargo test --locked --offline --workspace --all-targets
 ```
 
 The suite checks literal quoting fixtures, quote/escape structure, byte ranges,

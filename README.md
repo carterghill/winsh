@@ -3,8 +3,9 @@
 **win + sh**, also **Windows shell**: a native Windows shell written in Rust.
 
 The goal is Bash-compatible syntax for navigation and scripting, native Windows
-program execution, and compatible utilities such as cat and grep. A dedicated
-terminal is the next milestone, kept separate from the shell engine.
+program execution, and compatible utilities such as cat and grep. The dedicated
+Windows terminal hosts the shell through ConPTY and stays separate from the
+shell engine.
 
 The first working shell supports interactive input, one-command execution,
 directory navigation, Bash-style quoting and escaping, home-directory expansion,
@@ -23,7 +24,7 @@ Then enter commands in winsh:
 
 ~~~sh
 pwd
-cd src
+cd crates/winsh/src
 pwd
 cd -
 cd ~
@@ -42,6 +43,19 @@ cargo run -- -c 'pwd'
 cargo run -- --help
 cargo run -- --version
 ~~~
+
+To open the dedicated terminal on Windows:
+
+~~~powershell
+cargo build --workspace
+cargo run -p winsh-terminal
+~~~
+
+The terminal finds `winsh.exe` beside its own executable. It supports a resizable
+window, Unicode, cursor movement, colors, alternate screens, and scrollback.
+Use Ctrl+Shift+V to paste, Ctrl+Shift+C to copy the visible screen, and the mouse
+wheel or Shift+PageUp/PageDown to scroll. `exit` closes the window. See
+[the terminal guide](docs/terminal.md) for controls, other shells, and limits.
 
 See [the shell guide](docs/shell.md) for current limits and a walkthrough of the
 Rust code, and [the syntax guide](docs/syntax.md) for the parser API.
@@ -74,52 +88,65 @@ such as `matches!` and `write!`, update stable and restart the language server o
 reopen the project. In Zed, ensure the selected project toolchain is `stable`.
 
 ~~~powershell
-cargo build --release
+cargo build --workspace --release
 ~~~
 
-The release executable is `target/release/winsh.exe` on Windows.
+The release executables are `target/release/winsh.exe` and
+`target/release/winsh-terminal.exe` on Windows. Keep them together.
 
 Before committing changes:
 
 ~~~powershell
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 ~~~
 
-The only direct dependency is `windows-sys`, enabled on Windows for console input,
-Ctrl+C handling, and suppressing OS error dialogs during process launch.
-The parser and engine otherwise use Rust's standard library.
+The shell's only direct dependency is `windows-sys`, enabled on Windows for
+console input, Ctrl+C handling, and suppressing OS error dialogs during process
+launch. The parser and engine otherwise use Rust's standard library. The
+terminal uses `windows-sys` for its native window, GDI rendering, and ConPTY,
+and `vt100` for terminal parsing and screen state.
 
 Tests cover parsing, session state, directory links, exact native arguments,
 Unicode, environment, streaming I/O, and exit statuses. Windows link tests use
 the system Windows PowerShell to create directory junctions without requiring
 administrator privileges. An optional [Bash comparison test](docs/syntax.md#tests)
-checks literal quoting fixtures against a local Bash installation.
+checks literal quoting fixtures against a local Bash installation. Terminal
+tests cover screen behavior, input encoding, real ConPTY I/O, resizing, and
+process-tree cleanup.
 
 Keep `Cargo.lock` in source control. Once the toolchain and dependencies are
-cached, build without network access using `cargo build --locked --offline`.
+cached, build without network access using
+`cargo build --workspace --locked --offline`.
 
 ## Layout
 
 ~~~text
-src/main.rs          CLI options, input loop, prompts, and process exit
-src/console.rs       CLI console input and Windows Ctrl+C handling
-src/lib.rs           Public engine interface
-src/syntax/          Syntax types and simple-command parser
-src/shell.rs         Session state and command evaluation
-src/expand.rs        Quote-aware argument construction and ~/ expansion
-src/builtins.rs      cd, pwd, and exit
-src/exec.rs          Native executable lookup and foreground execution
-src/platform.rs      Platform-specific paths and process behavior
-src/streams.rs       Shared I/O handles for built-ins and native programs
-tests/syntax.rs      Parser tests and optional Bash comparison
-tests/shell.rs       Engine and CLI integration tests
-tests/support/       Native child fixture for integration tests
-examples/parse.rs    Development tool for inspecting parsed syntax
+crates/winsh/
+  src/main.rs        Shell CLI, input loop, and process exit
+  src/console.rs     Console input and Windows Ctrl+C handling
+  src/lib.rs         Public engine interface
+  src/syntax/        Syntax types and simple-command parser
+  src/shell.rs       Session state and command evaluation
+  src/expand.rs      Quote-aware argument construction and ~/ expansion
+  src/builtins.rs    cd, pwd, and exit
+  src/exec.rs        Native executable lookup and foreground execution
+  src/platform.rs    Native paths and process behavior
+  src/streams.rs     Shared I/O handles for built-ins and native programs
+  tests/            Parser, engine, and CLI integration tests
+  examples/parse.rs  Development tool for inspecting parsed syntax
+crates/winsh-terminal/
+  src/main.rs        Terminal launcher and shell selection
+  src/session.rs     ConPTY, pipe workers, and process-tree lifecycle
+  src/terminal.rs    VT screen state and terminal protocol replies
+  src/input.rs       Keyboard and paste encoding
+  src/window.rs      Native window, clipboard, DPI, and GDI rendering
+  tests/            Terminal behavior and ConPTY integration tests
 docs/architecture.md Boundaries and implementation order
 docs/syntax.md       Parser API and supported grammar
 docs/shell.md        Shell usage, compatibility limits, and code walkthrough
+docs/terminal.md     Dedicated terminal usage and supported behavior
 ~~~
 
 The layout follows [Cargo's standard conventions](https://doc.rust-lang.org/cargo/guide/project-layout.html).

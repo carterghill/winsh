@@ -19,8 +19,8 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
+        let root = std::path::absolute(env!("CARGO_TARGET_TMPDIR"))
+            .unwrap()
             .join("shell-tests");
         fs::create_dir_all(&root).unwrap();
         let path = root.join(format!(
@@ -35,8 +35,8 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
+        let root = std::path::absolute(env!("CARGO_TARGET_TMPDIR"))
+            .unwrap()
             .join("shell-tests");
         assert!(self.0.is_absolute() && self.0.parent() == Some(root.as_path()));
         // Only this uniquely created test directory may be recursively removed.
@@ -93,9 +93,7 @@ fn quote(value: impl AsRef<std::ffi::OsStr>) -> String {
 fn helper() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
     HELPER.get_or_init(|| {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-support");
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("test-support");
         fs::create_dir_all(&root).unwrap();
         let path = root.join(format!(
             "child-{}{}",

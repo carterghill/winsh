@@ -1,13 +1,16 @@
-[package]
-name = "winsh"
+[workspace]
+members = ["crates/winsh", "crates/winsh-terminal"]
+default-members = ["crates/winsh"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A native Windows shell with Bash-compatible syntax."
 publish = false
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_System_Diagnostics_Debug"] }
+[workspace.dependencies]
+windows-sys = "0.61.2"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"

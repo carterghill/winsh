@@ -1,0 +1,13 @@
+[package]
+name = "winsh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "A native Windows shell with Bash-compatible syntax."
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_Debug"] }
+
+[lints]
+workspace = true

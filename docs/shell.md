@@ -9,9 +9,12 @@ Run `cargo run` to start an interactive session, or `cargo run -- -c 'pwd'`
 from PowerShell to execute one command. A release build produces
 `target/release/winsh.exe`.
 
+The dedicated window is available with `cargo build --workspace` followed by
+`cargo run -p winsh-terminal`; see [the terminal guide](terminal.md).
+
 ~~~sh
 pwd
-cd src
+cd crates/winsh/src
 cd ..
 cd 'C:\Program Files'
 cd -
@@ -163,5 +166,6 @@ diagnostic; it is not an engine error that must terminate the host.
 
 `Shell::with_environment` accepts an explicit absolute directory and environment
 for embedding and isolated tests. The engine never changes process-wide cwd or
-environment. Console handlers belong solely to the CLI; a future terminal will
-host the executable through ConPTY.
+environment. Console handlers belong solely to the CLI; the dedicated terminal
+hosts the executable through ConPTY. The shell's source lives in
+`crates/winsh/src` and its tests in `crates/winsh/tests`.

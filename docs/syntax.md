@@ -1,9 +1,17 @@
-# Simple-command parsing
+# Command and pipeline parsing
 
 `winsh::syntax::parse_simple_command(&str)` returns
 `Result<Option<SimpleCommand>, ParseError>`. Blank or comment-only input produces
 `None`; a command contains words, and each word contains its original quoted and
 escaped pieces. This is a syntax API, not an argument-expansion or execution API.
+
+`winsh::syntax::parse_pipeline(&str)` returns
+`Result<Option<Pipeline>, ParseError>` and is the CLI/engine entry point. A
+`Pipeline` holds commands and one `PipeKind` connection per adjacent pair.
+`SimpleCommand` holds words and ordered `Redirection` values; each redirection
+retains its operator, optional descriptor, target word, and complete source span.
+`parse_simple_command` accepts redirections but rejects pipelines with multiple
+stages. A command can consist entirely of redirections and have no words.
 
 The implementation is a single forward scan with no intermediate token list or
 external dependencies. The parser is private; syntax types and the parsing
@@ -11,8 +19,12 @@ function are the public library interface. It performs no I/O.
 
 ## Supported input
 
-- One command, separated into words by unquoted spaces and tabs. Newlines end the
-  command; leading/trailing blank lines and comments are allowed.
+- One foreground pipeline, with command words separated by unquoted spaces and
+  tabs. `|` and `|&` connect stages; a newline/comment after a pipe can precede its
+  next stage. Leading/trailing blank lines and comments are allowed.
+- File and descriptor redirections: `<`, `>`, `>>`, `<>`, `>|`, `<&`, `>&`, `&>`,
+  and `&>>`. An adjacent unquoted descriptor number selects stdin/stdout/stderr.
+  Filename/descriptor operands are words with normal quoting and source spans.
 - Single quotes, double quotes, and adjacent quoted/unquoted text in one word.
   Empty quoted arguments are retained.
 - Backslash escapes outside quotes. In double quotes, backslash escapes `$`,
@@ -54,7 +66,7 @@ from this structure, keeping the parser independent of shell state.
 
 ## Current limits
 
-Operators (including pipes, redirects, and command separators), command
+Command separators (`;`, `&&`, `||`, `&`), compound commands, command
 substitution, braced parameter expansion, arithmetic expansion, and dollar-prefixed
 quoting return explicit unsupported-syntax errors. They require more grammar and
 must not be treated as literal arguments by accident. Ordinary assignment prefixes
@@ -62,8 +74,12 @@ and reserved words in command position are also rejected. This first subset is
 not a general Bash syntax validator; array assignments, contextual reserved-word
 rules, aliases, history expansion, and compound commands remain future work.
 
-Unclosed quotes and a trailing backslash return an error for which
+Unclosed quotes, a trailing backslash, and a missing command after a pipe return an error for which
 `is_incomplete()` is true, so the interactive reader can request more input.
+Missing redirection operands return `MissingRedirectionTarget` and are not
+incomplete input. Here-documents, here-strings, process substitutions, and
+descriptors above 2 return explicit unsupported-syntax errors. Descriptor
+duplication, moving, and closing are interpreted by the engine after expansion.
 The trailing-backslash rule is a streaming-input convention: Bash may accept it
 literally at the end of a completed script. NUL bytes are rejected. The parser
 does not normalize CRLF: CR remains word content, and LF is the line separator.
@@ -95,6 +111,7 @@ To additionally compare literal arguments with Bash (Git Bash example path):
 ```powershell
 $env:WINSH_TEST_BASH = 'C:\Program Files\Git\bin\bash.exe'
 cargo test --test syntax literal_quoting_matches_bash -- --ignored --exact
+cargo test --test shell redirections_and_pipelines_match_bash -- --ignored --exact
 ```
 
 This test feeds only fixed fixtures to Bash and compares NUL-delimited output,
@@ -102,3 +119,6 @@ including empty arguments. It is opt-in so ordinary development needs only Rust.
 On Windows, raw-CR fixtures stay in the Rust tests but are excluded from the Bash
 comparison because the Windows Bash port used during development discards them
 while reading source. Running the comparison on Linux includes those fixtures.
+The redirection/pipeline comparison runs fixed native-program fixtures in
+separate temporary directories and compares statuses, output streams, and file
+contents with Bash, including descriptor moves and `|&` ordering.

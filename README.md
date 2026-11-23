@@ -7,10 +7,10 @@ program execution, and compatible utilities such as cat and grep. The dedicated
 Windows terminal hosts the shell through ConPTY and stays separate from the
 shell engine.
 
-The first working shell supports interactive input, one-command execution,
+The working shell supports interactive input, one-pipeline execution,
 directory navigation, Bash-style quoting and escaping, home-directory expansion,
-and foreground native programs. Full Bash syntax and .sh scripts are not
-implemented yet.
+file redirections, streaming pipelines, and foreground native programs. Full Bash
+syntax and .sh scripts are not implemented yet.
 
 ## Try it
 
@@ -43,6 +43,20 @@ cargo run -- -c 'pwd'
 cargo run -- --help
 cargo run -- --version
 ~~~
+
+Inside winsh, redirections and pipelines work for built-ins and native programs:
+
+~~~sh
+pwd >location.txt
+pwd >>location.txt
+sort.exe <location.txt | findstr.exe winsh >matches.txt
+program.exe >output.txt 2>errors.txt
+program.exe >combined.txt 2>&1
+program.exe |& findstr.exe error
+~~~
+
+See [redirections and pipelines](docs/shell.md#redirections-and-pipelines) for
+descriptor handling, exit statuses, and the supported subset.
 
 To open the dedicated terminal on Windows:
 
@@ -112,7 +126,8 @@ Tests cover parsing, session state, directory links, exact native arguments,
 Unicode, environment, streaming I/O, and exit statuses. Windows link tests use
 the system Windows PowerShell to create directory junctions without requiring
 administrator privileges. An optional [Bash comparison test](docs/syntax.md#tests)
-checks literal quoting fixtures against a local Bash installation. Terminal
+checks literal quoting fixtures against a local Bash installation. A second
+comparison checks redirection ordering and pipeline behavior. Terminal
 tests cover screen behavior, input encoding, real ConPTY I/O, resizing, and
 process-tree cleanup.
 
@@ -127,11 +142,13 @@ crates/winsh/
   src/main.rs        Shell CLI, input loop, and process exit
   src/console.rs     Console input and Windows Ctrl+C handling
   src/lib.rs         Public engine interface
-  src/syntax/        Syntax types and simple-command parser
+  src/syntax/        Word, redirection, and pipeline syntax and parser
   src/shell.rs       Session state and command evaluation
   src/expand.rs      Quote-aware argument construction and ~/ expansion
   src/builtins.rs    cd, pwd, and exit
   src/exec.rs        Native executable lookup and foreground execution
+  src/pipeline.rs    Concurrent stages and isolated pipeline built-ins
+  src/redirect.rs    Ordered file and descriptor redirections
   src/platform.rs    Native paths and process behavior
   src/streams.rs     Shared I/O handles for built-ins and native programs
   tests/            Parser, engine, and CLI integration tests

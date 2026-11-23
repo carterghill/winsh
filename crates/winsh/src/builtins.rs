@@ -2,6 +2,10 @@ use std::{ffi::OsString, fs, io, path::Path};
 
 use crate::{Outcome, Shell, ShellIo, platform};
 
+pub(crate) fn recognizes(name: &std::ffi::OsStr) -> bool {
+    matches!(name.to_str(), Some("cd" | "pwd" | "exit"))
+}
+
 pub(crate) fn dispatch(
     shell: &mut Shell,
     arguments: &[OsString],

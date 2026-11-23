@@ -4,7 +4,7 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 
-use winsh::{Outcome, Shell, ShellIo, syntax::parse_simple_command};
+use winsh::{Outcome, Shell, ShellIo, syntax::parse_pipeline};
 
 mod console;
 
@@ -16,13 +16,14 @@ Usage: winsh [--help | --version]
 With no arguments, read commands from the terminal or standard input.
 
 Options:
-  -c            Execute one simple command and exit
+  -c            Execute one foreground pipeline and exit
   -h, --help    Show this help
   -V, --version Show the version
 
 Built-ins: cd [-L|-P] [--] [directory|-], pwd [-L|-P], exit [status]
-Supports quoted words, escapes, ~/ paths, and native executables.
-Pipelines, redirection, variables, wildcards, and script-file arguments are not implemented yet.";
+Supports quoted words, escapes, ~/ paths, native executables, redirections,
+and streaming pipelines (| and |&).
+Variables, wildcards, command lists, and script-file arguments are not implemented yet.";
 
 enum Mode {
     Input,
@@ -145,13 +146,13 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
             }
         }
         pending.push_str(&line);
-        match parse_simple_command(&pending) {
+        match parse_pipeline(&pending) {
             Err(error) if error.is_incomplete() && newline => {
                 pending.push('\n');
                 continue;
             }
             Ok(Some(command)) => {
-                let outcome = shell.execute(&command, streams)?;
+                let outcome = shell.execute_pipeline(&command, streams)?;
                 if let Outcome::Exit(status) = outcome {
                     return Ok(status);
                 }

@@ -251,8 +251,6 @@ fn rejects_operators_and_nested_syntax_before_it_can_be_misread_as_arguments() {
         "echo a || b",
         "echo a | b",
         "echo a &",
-        "echo >file",
-        "echo <file",
         "echo (a)",
         "echo )",
         "echo $(date)",
@@ -280,6 +278,182 @@ fn rejects_operators_and_nested_syntax_before_it_can_be_misread_as_arguments() {
     let error = parse_simple_command("echo $\\\n(date)").unwrap_err();
     assert_eq!(error.span, 5..9);
     assert_eq!(words(r#"echo ';' "|" \& \$\(date\)"#)[1..3], [";", "|"]);
+}
+
+#[test]
+fn parses_pipelines_and_ordered_redirections_without_losing_quote_context() {
+    use winsh::syntax::{PipeKind, RedirectionKind as R, parse_pipeline};
+    let source = "  <'in file' program first 2>>errors second >out |& next 2>&1 | last # tail";
+    let parsed = parse_pipeline(source).unwrap().unwrap();
+    assert_eq!(
+        parsed.connections,
+        [PipeKind::StdoutAndStderr, PipeKind::Stdout]
+    );
+    assert_eq!(parsed.commands.len(), 3);
+    let first = &parsed.commands[0];
+    assert_eq!(
+        first
+            .words
+            .iter()
+            .map(|word| quote_removed(&word.parts))
+            .collect::<Vec<_>>(),
+        ["program", "first", "second"]
+    );
+    assert_eq!(
+        first
+            .redirections
+            .iter()
+            .map(|redirect| redirect.kind)
+            .collect::<Vec<_>>(),
+        [R::Input, R::Append, R::Output]
+    );
+    assert_eq!(first.redirections[1].descriptor, Some(2));
+    assert_eq!(
+        quote_removed(&first.redirections[0].target.parts),
+        "in file"
+    );
+    assert!(matches!(
+        first.redirections[0].target.parts[0].kind,
+        WordPartKind::SingleQuoted(_)
+    ));
+    assert_eq!(&source[first.redirections[1].span.clone()], "2>>errors");
+    assert_eq!(parsed.commands[1].redirections[0].kind, R::DuplicateOutput);
+    assert_eq!(
+        &source[parsed.span],
+        "<'in file' program first 2>>errors second >out |& next 2>&1 | last"
+    );
+}
+
+#[test]
+fn recognizes_adjacent_operators_io_numbers_and_quoted_literals() {
+    use winsh::syntax::{RedirectionKind as R, parse_pipeline};
+    for (source, kinds) in [
+        (
+            "cmd<input>output>>append",
+            vec![R::Input, R::Output, R::Append],
+        ),
+        ("cmd<>rw>|overwrite", vec![R::ReadWrite, R::Clobber]),
+        (
+            "cmd&>all&>>more",
+            vec![R::OutputAndError, R::AppendAndError],
+        ),
+        ("cmd<&0>&2", vec![R::DuplicateInput, R::DuplicateOutput]),
+        (
+            "cmd &\\\n>all >\\\n>append",
+            vec![R::OutputAndError, R::Append],
+        ),
+    ] {
+        let parsed = parse_simple_command(source).unwrap().unwrap();
+        assert_eq!(
+            parsed
+                .redirections
+                .iter()
+                .map(|r| r.kind)
+                .collect::<Vec<_>>(),
+            kinds,
+            "{source}"
+        );
+    }
+    let parsed = command("cmd '2'>out 2 >other 2\\\n>>errors");
+    assert_eq!(parsed.words.len(), 3);
+    assert_eq!(
+        parsed
+            .redirections
+            .iter()
+            .map(|r| r.descriptor)
+            .collect::<Vec<_>>(),
+        [None, None, Some(2)]
+    );
+    assert_eq!(
+        words(r#"cmd 'a|b' "a>b" a\<b"#),
+        ["cmd", "a|b", "a>b", "a<b"]
+    );
+    let parsed = parse_pipeline("one|\n# comment\ntwo").unwrap().unwrap();
+    assert_eq!(parsed.commands.len(), 2);
+    let parsed = command(">empty");
+    assert!(parsed.words.is_empty());
+    assert_eq!(parsed.redirections.len(), 1);
+}
+
+#[test]
+fn missing_pipeline_stages_are_incomplete_but_missing_filenames_are_errors() {
+    use winsh::syntax::parse_pipeline;
+    for source in ["cmd |", "cmd |&\n# waiting"] {
+        let error = parse_pipeline(source).unwrap_err();
+        assert_eq!(error.kind, ParseErrorKind::MissingCommand);
+        assert!(error.is_incomplete());
+        assert!(source.get(error.span).is_some());
+    }
+    for source in ["cmd >", "cmd 2>&", "cmd >\nfile", "cmd > | next"] {
+        let error = parse_pipeline(source).unwrap_err();
+        assert_eq!(
+            error.kind,
+            ParseErrorKind::MissingRedirectionTarget,
+            "{source}"
+        );
+        assert!(!error.is_incomplete());
+    }
+    for source in [
+        "| cmd",
+        "cmd | | next",
+        "cmd || next",
+        "cmd && next",
+        "cmd <<EOF",
+        "cmd <<<text",
+        "cmd 9>file",
+    ] {
+        assert!(
+            matches!(
+                parse_pipeline(source).unwrap_err().kind,
+                ParseErrorKind::UnsupportedSyntax(_)
+            ),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pipeline_corpus_never_panics_and_has_valid_word_and_redirection_spans() {
+    use winsh::syntax::parse_pipeline;
+    let alphabet = [
+        'a', '2', ' ', '\n', '\\', '\'', '"', '#', '|', '<', '>', '&', '🦀',
+    ];
+    for mut value in 0..alphabet.len().pow(4) {
+        let mut source = String::new();
+        for _ in 0..4 {
+            source.push(alphabet[value % alphabet.len()]);
+            value /= alphabet.len();
+        }
+        match parse_pipeline(&source) {
+            Ok(Some(pipeline)) => {
+                assert_eq!(pipeline.connections.len() + 1, pipeline.commands.len());
+                for command in pipeline.commands {
+                    assert!(!command.words.is_empty() || !command.redirections.is_empty());
+                    assert!(source.get(command.span.clone()).is_some());
+                    for word in command
+                        .words
+                        .iter()
+                        .chain(command.redirections.iter().map(|r| &r.target))
+                    {
+                        assert!(!word.parts.is_empty());
+                        assert!(
+                            word.span.start >= command.span.start
+                                && word.span.end <= command.span.end
+                        );
+                        check_parts(&source, &word.parts, word.span.clone());
+                    }
+                    for redirect in command.redirections {
+                        assert!(source.get(redirect.span).is_some());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                assert!(!error.span.is_empty());
+                assert!(source.get(error.span).is_some(), "{source:?}");
+            }
+        }
+    }
 }
 
 #[test]

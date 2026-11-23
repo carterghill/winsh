@@ -311,8 +311,8 @@ fn exit_is_control_flow_with_bash_numeric_status_rules() {
 fn unsupported_syntax_and_expansion_never_execute_a_command() {
     let mut f = Fixture::new();
     for source in [
-        "pwd | something",
-        "pwd >file",
+        "pwd || something",
+        "pwd <<EOF",
         "pwd; exit",
         "pwd $HOME",
         "pwd \"$HOME\"",
@@ -517,4 +517,540 @@ fn shell_io_files_apply_to_native_stdin_as_well_as_builtin_output() {
         .with_stderr(File::create(&f.error).unwrap());
     assert_eq!(f.run(&format!("{} stdin", quote(helper()))).status(), 7);
     assert_eq!(fs::read(&f.output).unwrap(), b"file input\0bytes");
+}
+
+#[test]
+fn output_redirection_append_clobber_and_redirect_only_commands_restore_streams() {
+    let mut f = Fixture::new();
+    let expected = format!("{}\n", f.root.0.display());
+    assert_eq!(f.run("pwd >'space café 日本語'"), Outcome::Continue(0));
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("space café 日本語")).unwrap(),
+        expected
+    );
+    assert!(f.out().is_empty());
+    assert_eq!(f.run("pwd >>'space café 日本語'"), Outcome::Continue(0));
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("space café 日本語")).unwrap(),
+        expected.repeat(2)
+    );
+    assert_eq!(f.run("pwd >|'space café 日本語'"), Outcome::Continue(0));
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("space café 日本語")).unwrap(),
+        expected
+    );
+    assert_eq!(f.run(">empty"), Outcome::Continue(0));
+    assert_eq!(fs::read(f.root.0.join("empty")).unwrap(), b"");
+    assert_eq!(f.run("pwd"), Outcome::Continue(0));
+    assert_eq!(f.out(), expected);
+}
+
+#[test]
+fn native_stdin_stdout_and_stderr_can_be_redirected_independently() {
+    let mut f = Fixture::new();
+    let bytes = b"input\0binary\xff\xfe\n";
+    fs::write(f.root.0.join("input"), bytes).unwrap();
+    let child = quote(helper());
+    assert_eq!(
+        f.run(&format!("{child} copy <input >output")),
+        Outcome::Continue(0)
+    );
+    assert_eq!(fs::read(f.root.0.join("output")).unwrap(), bytes);
+    assert_eq!(
+        f.run(&format!("{child} both >output 2>errors")),
+        Outcome::Continue(0)
+    );
+    assert_eq!(fs::read(f.root.0.join("output")).unwrap(), b"child stdout");
+    assert_eq!(fs::read(f.root.0.join("errors")).unwrap(), b"child stderr");
+    assert_eq!(
+        f.run(&format!("{child} both >output 2>>errors")),
+        Outcome::Continue(0)
+    );
+    assert_eq!(
+        fs::read(f.root.0.join("errors")).unwrap(),
+        b"child stderrchild stderr"
+    );
+    assert!(f.out().is_empty());
+    assert!(f.err().is_empty());
+}
+
+#[test]
+fn descriptor_duplication_snapshots_the_current_stream_in_source_order() {
+    let child = quote(helper());
+    let mut f = Fixture::new();
+    assert_eq!(f.run(&format!("{child} both >merged 2>&1")).status(), 0);
+    assert_eq!(
+        fs::read(f.root.0.join("merged")).unwrap(),
+        b"child stdoutchild stderr"
+    );
+    assert!(f.out().is_empty());
+    let mut f = Fixture::new();
+    assert_eq!(f.run(&format!("{child} both 2>&1 >output")).status(), 0);
+    assert_eq!(fs::read(f.root.0.join("output")).unwrap(), b"child stdout");
+    assert_eq!(f.out(), "child stderr");
+    assert!(f.err().is_empty());
+    let mut f = Fixture::new();
+    assert_eq!(f.run(&format!("{child} both 1>&2")).status(), 0);
+    assert_eq!(f.err(), "child stdoutchild stderr");
+    assert!(f.out().is_empty());
+    // Also exercise inherited streams rather than File-backed engine fixtures.
+    let output = cli_bounded(&format!(
+        "{child} both 2>&1 >{}",
+        quote(f.root.0.join("native"))
+    ));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"child stderr");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn combined_output_redirections_and_input_duplication_work() {
+    let child = quote(helper());
+    for operator in ["&>", ">&"] {
+        let mut f = Fixture::new();
+        assert_eq!(
+            f.run(&format!("{child} both {operator}combined")).status(),
+            0
+        );
+        assert_eq!(
+            fs::read(f.root.0.join("combined")).unwrap(),
+            b"child stdoutchild stderr"
+        );
+        assert_eq!(f.run(&format!("{child} both &>>combined")).status(), 0);
+        assert_eq!(
+            fs::read(f.root.0.join("combined")).unwrap(),
+            b"child stdoutchild stderrchild stdoutchild stderr"
+        );
+    }
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("input"), b"preserved").unwrap();
+    assert_eq!(
+        f.run(&format!("{child} copy 2<input 0<&2 >output"))
+            .status(),
+        0
+    );
+    assert_eq!(fs::read(f.root.0.join("output")).unwrap(), b"preserved");
+    assert_eq!(f.run(&format!("{child} copy <>input >output")).status(), 0);
+    assert_eq!(fs::read(f.root.0.join("input")).unwrap(), b"preserved");
+    assert_eq!(fs::read(f.root.0.join("output")).unwrap(), b"preserved");
+    assert_eq!(f.run("<>created").status(), 0);
+    assert!(f.root.0.join("created").is_file());
+}
+
+#[test]
+fn redirection_paths_follow_shell_cwd_and_quote_aware_home_expansion() {
+    let mut f = Fixture::new();
+    let home = f.root.0.join("home");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(f.root.0.join("sub")).unwrap();
+    f.shell = Shell::with_environment(
+        f.root.0.clone(),
+        [(OsString::from("HOME"), home.clone().into_os_string())],
+    )
+    .unwrap();
+    assert_eq!(f.run("pwd >~/location").status(), 0);
+    assert_eq!(
+        fs::read_to_string(home.join("location")).unwrap(),
+        format!("{}\n", f.root.0.display())
+    );
+    assert_eq!(f.run("cd sub >created").status(), 0);
+    assert!(f.root.0.join("created").is_file());
+    assert_eq!(f.run("pwd >location").status(), 0);
+    assert!(f.root.0.join("sub/location").is_file());
+    assert_eq!(f.run("pwd >'~literal'").status(), 0);
+    assert!(f.root.0.join("sub/~literal").is_file());
+}
+
+#[test]
+fn failed_redirections_prevent_builtins_and_use_previously_redirected_stderr() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.root.0.join("sub")).unwrap();
+    assert_eq!(
+        f.run("cd sub 2>errors >missing/output"),
+        Outcome::Continue(1)
+    );
+    assert_eq!(f.shell.cwd(), f.root.0);
+    assert!(
+        fs::read_to_string(f.root.0.join("errors"))
+            .unwrap()
+            .contains("missing/output")
+    );
+    assert!(f.err().is_empty());
+    assert_eq!(f.run("exit 42 >missing/output"), Outcome::Continue(1));
+    assert_eq!(f.run("pwd").status(), 0);
+    assert_eq!(f.out(), format!("{}\n", f.root.0.display()));
+    assert_eq!(f.run("pwd >first >second").status(), 0);
+    assert_eq!(fs::read(f.root.0.join("first")).unwrap(), b"");
+    assert!(!fs::read(f.root.0.join("second")).unwrap().is_empty());
+}
+
+#[test]
+fn unsupported_expansions_are_validated_before_pipeline_side_effects() {
+    let mut f = Fixture::new();
+    for source in [
+        "pwd >created $HOME",
+        "pwd >created | pwd $HOME",
+        "pwd >$HOME",
+        "pwd >created | pwd >*.txt",
+    ] {
+        assert_eq!(f.run(source), Outcome::Continue(2), "{source}");
+        assert!(!f.root.0.join("created").exists());
+        assert!(f.out().is_empty());
+    }
+    for source in ["pwd 2>&9", "pwd 1>&nonsense"] {
+        assert_eq!(f.run(source), Outcome::Continue(1), "{source}");
+    }
+    assert!(!f.root.0.join("-").exists());
+}
+
+#[test]
+fn builtin_output_write_errors_fail_the_command_and_keep_the_session_alive() {
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("readonly"), b"preserved").unwrap();
+    assert_eq!(f.run("pwd 1<readonly"), Outcome::Continue(1));
+    assert_eq!(fs::read(f.root.0.join("readonly")).unwrap(), b"preserved");
+    assert_eq!(f.run("pwd"), Outcome::Continue(0));
+}
+
+#[test]
+fn pipelines_stream_large_binary_output_through_all_stages() {
+    let f = Fixture::new();
+    let child = quote(helper());
+    let output_file = f.root.0.join("payload");
+    let output = cli_bounded(&format!(
+        "{child} generate 4194304 | {child} copy | {child} copy >{}",
+        quote(&output_file)
+    ));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let bytes = fs::read(output_file).unwrap();
+    assert_eq!(bytes.len(), 4 * 1024 * 1024);
+    assert!(
+        bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte == (index % 256) as u8)
+    );
+}
+
+#[test]
+fn early_consumers_and_failed_middle_stages_close_all_unused_pipe_ends() {
+    let f = Fixture::new();
+    let child = quote(helper());
+    let prefix = f.root.0.join("prefix");
+    let output = cli_bounded(&format!(
+        "{child} generate 16777216 | {child} head 17 >{}",
+        quote(&prefix)
+    ));
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(fs::read(prefix).unwrap(), (0..17).collect::<Vec<u8>>());
+    let output = cli_bounded(&format!(
+        "{child} generate 16777216 | winsh-command-that-does-not-exist | {child} copy"
+    ));
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("winsh-command-that-does-not-exist"));
+}
+
+#[test]
+fn explicit_redirections_override_pipes_and_pipe_stderr_merges_after_them() {
+    let child = quote(helper());
+    let mut f = Fixture::new();
+    assert_eq!(
+        f.run(&format!("{child} both 2>unused |& {child} copy >merged"))
+            .status(),
+        0
+    );
+    assert_eq!(fs::read(f.root.0.join("unused")).unwrap(), b"");
+    assert_eq!(
+        fs::read(f.root.0.join("merged")).unwrap(),
+        b"child stdoutchild stderr"
+    );
+    assert_eq!(
+        f.run(&format!("{child} both >diverted |& {child} copy >empty"))
+            .status(),
+        0
+    );
+    assert_eq!(
+        fs::read(f.root.0.join("diverted")).unwrap(),
+        b"child stdoutchild stderr"
+    );
+    assert_eq!(fs::read(f.root.0.join("empty")).unwrap(), b"");
+    fs::write(f.root.0.join("input"), b"replacement input").unwrap();
+    assert_eq!(
+        f.run(&format!(
+            "{child} generate 1024 | {child} copy <input >output"
+        ))
+        .status(),
+        0
+    );
+    assert_eq!(
+        fs::read(f.root.0.join("output")).unwrap(),
+        b"replacement input"
+    );
+    assert_eq!(
+        f.run(&format!("pwd 1>&- |& {child} copy >empty")).status(),
+        0
+    );
+    assert_eq!(fs::read(f.root.0.join("empty")).unwrap(), b"");
+}
+
+#[test]
+fn pipeline_builtins_use_isolated_sessions_and_exit_does_not_leave_the_parent() {
+    let child = quote(helper());
+    let mut f = Fixture::new();
+    fs::create_dir(f.root.0.join("sub")).unwrap();
+    assert_eq!(f.run(&format!("pwd | {child} copy >output")).status(), 0);
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("output")).unwrap(),
+        format!("{}\n", f.root.0.display())
+    );
+    assert_eq!(f.run("cd sub | pwd"), Outcome::Continue(0));
+    assert_eq!(f.shell.cwd(), f.root.0);
+    assert_eq!(f.out(), format!("{}\n", f.root.0.display()));
+    assert_eq!(f.run("pwd | cd sub"), Outcome::Continue(0));
+    assert_eq!(f.shell.cwd(), f.root.0);
+    assert_eq!(
+        f.run(&format!("exit 42 | {child} status 7")),
+        Outcome::Continue(7)
+    );
+    assert_eq!(f.run("pwd | exit 9"), Outcome::Continue(9));
+    assert_eq!(f.run("pwd"), Outcome::Continue(0));
+}
+
+#[test]
+fn pipeline_status_comes_from_the_last_stage_and_all_children_are_waited() {
+    let child = quote(helper());
+    let mut f = Fixture::new();
+    assert_eq!(
+        f.run(&format!("{child} status 37 | {child} status 5")),
+        Outcome::Continue(5)
+    );
+    assert_eq!(f.shell.last_status(), 5);
+    assert_eq!(
+        f.run(&format!("{child} status 0 | missing-winsh-command")),
+        Outcome::Continue(127)
+    );
+    assert_eq!(
+        f.run(&format!("{child} copy <missing | {child} copy")),
+        Outcome::Continue(0)
+    );
+    assert_eq!(
+        f.run(&format!(
+            "{child} generate 32 | {child} copy >missing/output"
+        )),
+        Outcome::Continue(1)
+    );
+    assert_eq!(
+        f.run(&format!("{child} delayed-mark marker | {child} status 0")),
+        Outcome::Continue(0)
+    );
+    assert!(
+        f.root.0.join("marker").is_file(),
+        "upstream must finish before returning"
+    );
+}
+
+#[test]
+fn host_io_failure_during_pipeline_start_kills_and_reaps_started_children() {
+    let mut f = Fixture::new();
+    let child = quote(helper());
+    f.io = ShellIo::inherited()
+        .with_stdout(File::create(&f.output).unwrap())
+        .with_stderr(File::open(&f.error).unwrap());
+    let source = format!("{child} delayed-mark leaked | missing-winsh-command");
+    assert!(f.shell.run(&source, &mut f.io).is_err());
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        !f.root.0.join("leaked").exists(),
+        "started child was abandoned"
+    );
+}
+
+#[test]
+fn cli_accepts_multiline_pipelines_and_does_not_read_ahead_of_native_stdin() {
+    let child = quote(helper());
+    let source = format!("{child} args one |\n# continuation\n{child} copy\nexit\n");
+    let output = cli(&[], source.as_bytes());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"one\0");
+    let source = format!("{child} copy | {child} copy\npayload\0binary\n");
+    let output = cli(&[], source.as_bytes());
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"payload\0binary\n");
+    assert_eq!(cli(&["-c", "pwd |"], b"").status.code(), Some(2));
+    assert_eq!(cli(&[], b"pwd |\n").status.code(), Some(2));
+}
+
+#[test]
+fn descriptor_closing_and_moving_fail_native_io_and_restore_parent_streams() {
+    let child = quote(helper());
+    let mut f = Fixture::new();
+    assert_eq!(f.run("pwd >&-"), Outcome::Continue(1));
+    assert_eq!(f.run("pwd 1>&- 2>&1"), Outcome::Continue(1));
+    assert_eq!(f.run("missing-winsh-command 2>&-"), Outcome::Continue(127));
+    assert_eq!(f.run("exit bad 2>&-"), Outcome::Exit(2));
+    assert_eq!(f.run("pwd 2>&- >missing/output"), Outcome::Continue(1));
+    assert_eq!(f.run("pwd"), Outcome::Continue(0));
+    assert_eq!(f.out(), format!("{}\n", f.root.0.display()));
+    assert_eq!(f.run("cd missing 1>moved 2>&1-"), Outcome::Continue(1));
+    assert!(
+        fs::read_to_string(f.root.0.join("moved"))
+            .unwrap()
+            .contains("cd:")
+    );
+    fs::write(f.root.0.join("input"), b"moved input").unwrap();
+    assert_eq!(
+        f.run(&format!("{child} copy 2<input 0<&2- >output"))
+            .status(),
+        0
+    );
+    assert_eq!(fs::read(f.root.0.join("output")).unwrap(), b"moved input");
+    assert_eq!(f.run(&format!("{child} status 0 1>&- 2>&-")).status(), 0);
+    let output = cli_bounded(&format!("{child} raw-stdin 0<&-"));
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "reading a closed input must fail"
+    );
+    let output = cli_bounded(&format!("{child} raw-stdout 1>&-"));
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "writing a closed output must fail"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+#[ignore = "requires Bash; set WINSH_TEST_BASH to its executable path"]
+fn redirections_and_pipelines_match_bash() {
+    let bash = env::var_os("WINSH_TEST_BASH").expect("set WINSH_TEST_BASH");
+    let child = quote(helper().to_string_lossy().replace('\\', "/"));
+    let cases = [
+        format!("{child} both >a 2>&1"),
+        format!("{child} both 2>&1 >a"),
+        format!("{child} both 1>&2 2>a"),
+        format!("{child} both &>a"),
+        format!("{child} both >&a"),
+        format!("{child} both &>>a"),
+        format!("{child} both >a >b"),
+        format!("{child} both 2>a |& {child} copy >b"),
+        format!("{child} both >a |& {child} copy >b"),
+        format!("{child} both 2>&1 | {child} copy >a"),
+        format!("{child} copy <input | {child} copy >a"),
+        format!("{child} copy <>input >a"),
+        format!("{child} copy 2<input 0<&2- >a"),
+        format!("{child} status 7 | {child} status 3"),
+        format!("{child} status 0 0<&1"),
+        format!("{child} status 0 1>&0"),
+        format!("{child} status 0 1>&- 2>&-"),
+        format!("exit 7 | {child} status 0"),
+        "cd missing 1>a 2>&1-".to_owned(),
+        ">a".to_owned(),
+    ];
+    for source in cases {
+        let mut f = Fixture::new();
+        let reference = TempDir::new();
+        fs::write(f.root.0.join("input"), b"input\0bytes\xff").unwrap();
+        fs::write(reference.0.join("input"), b"input\0bytes\xff").unwrap();
+        fs::write(f.root.0.join("a"), b"existing").unwrap();
+        fs::write(reference.0.join("a"), b"existing").unwrap();
+        let mut process = Command::new(&bash)
+            .args(["--noprofile", "--norc", "-s"])
+            .env_remove("BASH_ENV")
+            .env_remove("ENV")
+            .env("MSYS2_ARG_CONV_EXCL", "*")
+            .current_dir(&reference.0)
+            .stdin(Stdio::piped())
+            .stdout(File::create(reference.0.join("stdout")).unwrap())
+            .stderr(File::create(reference.0.join("stderr")).unwrap())
+            .spawn()
+            .unwrap();
+        process
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{source}\n").as_bytes())
+            .unwrap();
+        let expected = process.wait().unwrap();
+        let actual = f.run(&source);
+        assert_eq!(actual.status(), expected.code().unwrap(), "{source}");
+        assert_eq!(
+            fs::read(&f.output).unwrap(),
+            fs::read(reference.0.join("stdout")).unwrap(),
+            "stdout: {source}"
+        );
+        // Built-in diagnostics use the winsh prefix and native Windows errors.
+        if !source.starts_with("cd ") {
+            assert_eq!(
+                fs::read(&f.error).unwrap(),
+                fs::read(reference.0.join("stderr")).unwrap(),
+                "stderr: {source}"
+            );
+        }
+        for name in ["input", "a", "b"] {
+            if source.starts_with("cd ") && name == "a" {
+                continue;
+            }
+            assert_eq!(
+                fs::read(f.root.0.join(name)).ok(),
+                fs::read(reference.0.join(name)).ok(),
+                "file {name}: {source}"
+            );
+        }
+    }
+}
+
+/// Bound regression tests that would otherwise hang forever on a leaked pipe
+/// endpoint or a producer being waited before its consumer has been started.
+fn cli_bounded(source: &str) -> Output {
+    use std::{
+        io::Read,
+        thread,
+        time::{Duration, Instant},
+    };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_winsh"))
+        .args(["-c", source])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    thread::scope(|scope| {
+        let out = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let err = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("pipeline did not finish: {source}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        Output {
+            status,
+            stdout: out.join().unwrap(),
+            stderr: err.join().unwrap(),
+        }
+    })
 }

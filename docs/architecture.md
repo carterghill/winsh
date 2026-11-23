@@ -32,10 +32,12 @@ on the engine and launches the shell executable as a separate process.
 
 | Module | Responsibility |
 | --- | --- |
-| `syntax` | Parsing, syntax trees, and source locations. No filesystem or process access. |
+| `syntax` | Words, redirections, pipelines, and source locations. No filesystem or process access. |
 | `expand` | Quote-aware argument construction: currently literals and home-directory expansion. |
 | `shell` | Working directory, inherited environment, last status, and evaluation. |
 | `exec` | Executable lookup and foreground child lifecycle. |
+| `pipeline` | Starting concurrent stages, isolated built-ins, and waiting for every stage. |
+| `redirect` | Opening files and applying descriptor changes in source order. |
 | `builtins` | Commands that need session state: cd, pwd, and exit. |
 | `platform` | Native paths, exit statuses, and process launch details. |
 | `streams` | Explicit standard I/O handles shared by built-ins and children. |
@@ -45,8 +47,9 @@ The command flow is:
 
 ~~~text
 CLI input (interactive, -c, or eventually a script)
-    -> syntax: parse words and preserve quoting
-    -> expand: construct arguments using session state
+    -> syntax: parse a pipeline, words, and ordered redirections
+    -> expand: construct arguments and redirection targets using session state
+    -> streams: connect pipes and apply each stage's redirections
     -> builtins: operate on the session
        OR exec: launch a native program
     -> Outcome: continue or exit, with a status
@@ -131,7 +134,10 @@ no shell framework, async runtime, or GUI toolkit dependency.
 3. **Implemented:** minimal dedicated terminal using ConPTY, with presentation
    and terminal-emulation code in its own package. See [terminal.md](terminal.md)
    for the supported subset and remaining terminal improvements.
-4. Add redirections and pipelines with streaming I/O and correct process cleanup.
+4. **Implemented:** ordered file/descriptor redirections and streaming foreground
+   pipelines. Native stages start before waiting, pipeline built-ins use cloned
+   sessions, unused pipe ends close promptly, and child guards kill/reap on host
+   failures. See [the supported subset](shell.md#redirections-and-pipelines).
 5. Add script-file input and language features incrementally: variables,
    expansions, command lists, control flow, and functions. Compare each feature
    against Bash and record intentional Windows differences.

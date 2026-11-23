@@ -3,12 +3,51 @@ use std::{
     ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
 };
 
 use crate::{Shell, ShellIo, platform};
 
+pub(crate) enum Spawned {
+    Running(ChildProcess),
+    Complete(i32),
+}
+
+/// A failed host operation must never abandon an already-started native child.
+pub(crate) struct ChildProcess {
+    child: Child,
+    waited: bool,
+}
+
+impl ChildProcess {
+    pub(crate) fn wait(&mut self) -> io::Result<i32> {
+        let status = self.child.wait()?;
+        self.waited = true;
+        Ok(platform::exit_status(status))
+    }
+}
+
+impl Drop for ChildProcess {
+    fn drop(&mut self) {
+        if !self.waited {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
+    match spawn(shell, arguments, io)? {
+        Spawned::Running(mut child) => child.wait(),
+        Spawned::Complete(status) => Ok(status),
+    }
+}
+
+pub(crate) fn spawn(
+    shell: &Shell,
+    arguments: &[OsString],
+    io: &mut ShellIo,
+) -> io::Result<Spawned> {
     let program = &arguments[0];
     let executable = match resolve(shell, program) {
         Ok(path) => path,
@@ -17,11 +56,13 @@ pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io
                 "winsh: {}: {error}\n",
                 program.to_string_lossy()
             ))?;
-            return Ok(if error.kind() == io::ErrorKind::NotFound {
-                127
-            } else {
-                126
-            });
+            return Ok(Spawned::Complete(
+                if error.kind() == io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                },
+            ));
         }
     };
     // Rust can implicitly invoke cmd.exe for batch files. Defer that separate
@@ -34,7 +75,7 @@ pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io
         io.err(format_args!(
             "winsh: batch files are not supported yet; invoke their interpreter explicitly\n"
         ))?;
-        return Ok(126);
+        return Ok(Spawned::Complete(126));
     }
     let mut child = Command::new(executable);
     child
@@ -43,15 +84,18 @@ pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io
         .env_clear()
         .envs(shell.environment.iter().map(|(key, value)| (key, value)));
     io.configure(&mut child)?;
-    match platform::spawn(&mut child).and_then(|mut child| child.wait()) {
-        Ok(status) => Ok(platform::exit_status(status)),
+    match platform::spawn(&mut child) {
+        Ok(child) => Ok(Spawned::Running(ChildProcess {
+            child,
+            waited: false,
+        })),
         Err(error) => {
             io.err(format_args!(
                 "winsh: {}: {error}\n",
                 program.to_string_lossy()
             ))?;
             // Resolution succeeded; failure to start is an execution failure.
-            Ok(126)
+            Ok(Spawned::Complete(126))
         }
     }
 }

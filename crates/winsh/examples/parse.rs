@@ -1,7 +1,7 @@
 //! Inspect syntax without adding parser diagnostics to the shell's CLI.
 use std::{env, process::ExitCode};
 
-use winsh::syntax::parse_simple_command;
+use winsh::syntax::parse_pipeline;
 
 fn main() -> ExitCode {
     let mut args = env::args_os().skip(1);
@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    match parse_simple_command(source) {
+    match parse_pipeline(source) {
         Ok(command) => {
             println!("{command:#?}");
             ExitCode::SUCCESS

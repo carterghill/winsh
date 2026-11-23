@@ -1,4 +1,4 @@
-//! Parsing for the first supported subset of Bash: one simple command.
+//! Parsing for simple commands, redirections, and foreground pipelines.
 //!
 //! Words retain quote boundaries, escapes, and UTF-8 byte ranges into the input.
 //! Parsing never expands words, reads the environment, or executes commands.
@@ -7,14 +7,52 @@ use std::{fmt, ops::Range};
 
 mod parser;
 
-pub use parser::parse_simple_command;
+pub use parser::{parse_pipeline, parse_simple_command};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pipeline {
+    pub commands: Vec<SimpleCommand>,
+    /// One connection between each adjacent pair of commands.
+    pub connections: Vec<PipeKind>,
+    pub span: Range<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeKind {
+    Stdout,
+    StdoutAndStderr,
+}
 
 /// A command's words before expansion or command lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleCommand {
     pub words: Vec<Word>,
+    /// Kept in source order, independently of intervening command words.
+    pub redirections: Vec<Redirection>,
     /// Source range excluding leading/trailing whitespace and comments.
     pub span: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redirection {
+    /// None selects the operator's default descriptor. Only 0, 1, 2 are supported.
+    pub descriptor: Option<u8>,
+    pub kind: RedirectionKind,
+    pub target: Word,
+    pub span: Range<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectionKind {
+    Input,
+    Output,
+    Append,
+    ReadWrite,
+    Clobber,
+    DuplicateInput,
+    DuplicateOutput,
+    OutputAndError,
+    AppendAndError,
 }
 
 /// Adjacent quoted and unquoted pieces form one shell word.
@@ -64,6 +102,8 @@ pub enum ParseErrorKind {
     TrailingEscape,
     UnsupportedSyntax(&'static str),
     MultipleCommands,
+    MissingCommand,
+    MissingRedirectionTarget,
     NullByte,
 }
 
@@ -72,7 +112,9 @@ impl ParseError {
     pub fn is_incomplete(&self) -> bool {
         matches!(
             self.kind,
-            ParseErrorKind::UnclosedQuote(_) | ParseErrorKind::TrailingEscape
+            ParseErrorKind::UnclosedQuote(_)
+                | ParseErrorKind::TrailingEscape
+                | ParseErrorKind::MissingCommand
         )
     }
 }
@@ -86,7 +128,9 @@ impl fmt::Display for ParseError {
             ParseErrorKind::UnsupportedSyntax(feature) => {
                 write!(f, "{feature} is not supported yet")
             }
-            ParseErrorKind::MultipleCommands => write!(f, "expected only one simple command"),
+            ParseErrorKind::MultipleCommands => write!(f, "expected only one foreground pipeline"),
+            ParseErrorKind::MissingCommand => write!(f, "expected a command after pipe"),
+            ParseErrorKind::MissingRedirectionTarget => write!(f, "expected a redirection target"),
             ParseErrorKind::NullByte => write!(f, "shell input cannot contain a NUL byte"),
         }?;
         write!(f, " at bytes {}..{}", self.span.start, self.span.end)

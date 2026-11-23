@@ -1,13 +1,26 @@
-use super::{ParseError, ParseErrorKind, Quote, SimpleCommand, Word, WordPart, WordPartKind};
+use super::{
+    ParseError, ParseErrorKind, PipeKind, Pipeline, Quote, Redirection, RedirectionKind,
+    SimpleCommand, Word, WordPart, WordPartKind,
+};
 
 /// Parse one simple command, or `None` for blank/comment-only input.
 ///
-/// Supports ordinary words, single/double quotes, escapes, line continuations,
-/// and comments. Leading/trailing blank lines are accepted, but a second command
-/// is rejected. Operators, compound substitutions, special dollar quoting,
-/// assignment prefixes, and reserved words in command position are not supported.
-/// Unexpanded words are syntax, not a ready-to-execute argument vector.
+/// Supports words and redirections. Use parse_pipeline for pipe operators.
 pub fn parse_simple_command(source: &str) -> Result<Option<SimpleCommand>, ParseError> {
+    let Some(mut pipeline) = parse_pipeline(source)? else {
+        return Ok(None);
+    };
+    if pipeline.commands.len() != 1 {
+        return Err(ParseError {
+            kind: ParseErrorKind::UnsupportedSyntax("pipeline in simple-command parser"),
+            span: pipeline.span,
+        });
+    }
+    Ok(pipeline.commands.pop())
+}
+
+/// Parse one foreground pipeline, retaining quote contexts and source ranges.
+pub fn parse_pipeline(source: &str) -> Result<Option<Pipeline>, ParseError> {
     if let Some(start) = source.find('\0') {
         return Err(ParseError {
             kind: ParseErrorKind::NullByte,
@@ -24,34 +37,226 @@ struct Parser<'a> {
 }
 
 impl Parser<'_> {
-    fn parse(mut self) -> Result<Option<SimpleCommand>, ParseError> {
+    fn parse(mut self) -> Result<Option<Pipeline>, ParseError> {
         self.skip_trivia();
         let start = self.pos;
-        let mut words = Vec::new();
-
-        while let Some(ch) = self.peek() {
-            match ch {
-                ' ' | '\t' => self.pos += 1,
-                '\n' | '#' => break,
-                _ => words.push(self.word()?),
-            }
-        }
-
-        let Some(last) = words.last() else {
+        if self.peek().is_none() {
             return Ok(None);
-        };
-        let end = last.span.end;
-
+        }
+        let mut commands = vec![self.command()?];
+        let mut connections = Vec::new();
+        while self.peek() == Some('|') {
+            let pipe_start = self.pos;
+            self.pos += 1;
+            let kind = match self.peek() {
+                Some('|') => {
+                    return Err(self.error(
+                        ParseErrorKind::UnsupportedSyntax("command list"),
+                        pipe_start,
+                        self.pos + 1 - pipe_start,
+                    ));
+                }
+                Some('&') => {
+                    self.pos += 1;
+                    PipeKind::StdoutAndStderr
+                }
+                _ => PipeKind::Stdout,
+            };
+            let pipe_end = self.pos;
+            self.skip_trivia();
+            if self.peek().is_none() {
+                return Err(self.error(
+                    ParseErrorKind::MissingCommand,
+                    pipe_start,
+                    pipe_end - pipe_start,
+                ));
+            }
+            connections.push(kind);
+            commands.push(self.command()?);
+        }
+        let end = commands.last().unwrap().span.end;
         self.skip_trivia();
         if let Some(ch) = self.peek() {
             return Err(self.error(ParseErrorKind::MultipleCommands, self.pos, ch.len_utf8()));
         }
-
-        check_command_word(&words[0])?;
-        Ok(Some(SimpleCommand {
-            words,
+        Ok(Some(Pipeline {
+            commands,
+            connections,
             span: start..end,
         }))
+    }
+
+    fn command(&mut self) -> Result<SimpleCommand, ParseError> {
+        self.skip_spaces();
+        let start = self.pos;
+        let mut words = Vec::new();
+        let mut redirections = Vec::new();
+        let mut end = start;
+
+        while let Some(ch) = self.peek() {
+            match ch {
+                ' ' | '\t' => self.pos += 1,
+                '\n' | '#' | '|' => break,
+                '<' | '>' => redirections.push(self.redirection(None, self.pos)?),
+                '&' if self.following() == Some('>') => {
+                    redirections.push(self.redirection(None, self.pos)?)
+                }
+                ';' | '&' | '(' | ')' => {
+                    return Err(self.error(
+                        ParseErrorKind::UnsupportedSyntax("shell operator"),
+                        self.pos,
+                        1,
+                    ));
+                }
+                _ => {
+                    let word = self.word()?;
+                    let descriptor = match &word.parts[..] {
+                        [
+                            WordPart {
+                                kind: WordPartKind::Text(text),
+                                ..
+                            },
+                        ] if !text.is_empty()
+                            && text.bytes().all(|b| b.is_ascii_digit())
+                            && matches!(self.peek(), Some('<' | '>')) =>
+                        {
+                            Some(text.parse::<u8>().ok().filter(|fd| *fd <= 2).ok_or_else(
+                                || {
+                                    self.error(
+                                        ParseErrorKind::UnsupportedSyntax(
+                                            "descriptors other than 0, 1, and 2",
+                                        ),
+                                        word.span.start,
+                                        word.span.len(),
+                                    )
+                                },
+                            )?)
+                        }
+                        _ => None,
+                    };
+                    if let Some(descriptor) = descriptor {
+                        redirections.push(self.redirection(Some(descriptor), word.span.start)?);
+                    } else {
+                        words.push(word);
+                    }
+                }
+            }
+            if !matches!(ch, ' ' | '\t') {
+                end = self.pos;
+            }
+        }
+        if words.is_empty() && redirections.is_empty() {
+            let length = self.peek().map_or(1, char::len_utf8);
+            return Err(self.error(
+                ParseErrorKind::UnsupportedSyntax("empty pipeline stage"),
+                self.pos,
+                length,
+            ));
+        }
+        if let Some(first) = words.first() {
+            check_command_word(first)?;
+        }
+        Ok(SimpleCommand {
+            words,
+            redirections,
+            span: start..end,
+        })
+    }
+
+    fn redirection(
+        &mut self,
+        descriptor: Option<u8>,
+        start: usize,
+    ) -> Result<Redirection, ParseError> {
+        let first = self.peek().unwrap();
+        self.pos += 1;
+        let kind = match first {
+            '&' => {
+                self.peek(); // remove continuations between & and >
+                self.pos += 1; // the > in &>
+                if self.peek() == Some('>') {
+                    self.pos += 1;
+                    RedirectionKind::AppendAndError
+                } else {
+                    RedirectionKind::OutputAndError
+                }
+            }
+            '<' => match self.peek() {
+                Some('<') => {
+                    return Err(self.error(
+                        ParseErrorKind::UnsupportedSyntax("here-document or here-string"),
+                        start,
+                        self.pos + 1 - start,
+                    ));
+                }
+                Some('>') => {
+                    self.pos += 1;
+                    RedirectionKind::ReadWrite
+                }
+                Some('&') => {
+                    self.pos += 1;
+                    RedirectionKind::DuplicateInput
+                }
+                _ => RedirectionKind::Input,
+            },
+            '>' => match self.peek() {
+                Some('>') => {
+                    self.pos += 1;
+                    RedirectionKind::Append
+                }
+                Some('&') => {
+                    self.pos += 1;
+                    RedirectionKind::DuplicateOutput
+                }
+                Some('|') => {
+                    self.pos += 1;
+                    RedirectionKind::Clobber
+                }
+                _ => RedirectionKind::Output,
+            },
+            _ => unreachable!(),
+        };
+        let operator_end = self.pos;
+        self.skip_spaces();
+        if self.peek() == Some('(') {
+            return Err(self.error(
+                ParseErrorKind::UnsupportedSyntax("process substitution"),
+                start,
+                self.pos + 1 - start,
+            ));
+        }
+        if matches!(
+            self.peek(),
+            None | Some('\n' | '#' | '|' | '<' | '>' | '&' | ';' | '(' | ')')
+        ) {
+            return Err(self.error(
+                ParseErrorKind::MissingRedirectionTarget,
+                start,
+                operator_end - start,
+            ));
+        }
+        let target = self.word()?;
+        let end = target.span.end;
+        Ok(Redirection {
+            descriptor,
+            kind,
+            target,
+            span: start..end,
+        })
+    }
+
+    fn skip_spaces(&mut self) {
+        while matches!(self.peek(), Some(' ' | '\t')) {
+            self.pos += 1;
+        }
+    }
+
+    fn following(&self) -> Option<char> {
+        Parser {
+            source: self.source,
+            pos: self.pos + 1,
+        }
+        .peek()
     }
 
     fn word(&mut self) -> Result<Word, ParseError> {
@@ -61,8 +266,8 @@ impl Parser<'_> {
         while let Some(ch) = self.peek() {
             let part_start = self.pos;
             match ch {
-                ' ' | '\t' | '\n' => break,
-                ';' | '&' | '|' | '<' | '>' | '(' | ')' => {
+                ' ' | '\t' | '\n' | '&' | '|' | '<' | '>' => break,
+                ';' | '(' | ')' => {
                     return Err(self.error(
                         ParseErrorKind::UnsupportedSyntax("shell operator"),
                         self.pos,

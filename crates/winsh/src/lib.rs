@@ -5,7 +5,9 @@ pub mod syntax;
 mod builtins;
 mod exec;
 mod expand;
+mod pipeline;
 mod platform;
+mod redirect;
 mod shell;
 mod streams;
 

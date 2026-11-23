@@ -76,8 +76,9 @@ truncate or extend existing rows rather than reflowing old text. Scrollback
 has no scrollbar. This is a basic VT terminal, not full xterm compatibility.
 
 The hosted program owns command-line editing. History, completion, background
-jobs, and job control remain separate shell milestones. The terminal adds no
-shell syntax, pipelines, redirections, or script-file support.
+jobs, and job control remain separate shell milestones. Pipelines and redirections
+are implemented by winsh and work inside this window; see [the shell guide](shell.md#redirections-and-pipelines).
+The terminal itself adds no language rules or script-file support.
 
 ## Validation
 
@@ -94,8 +95,8 @@ Two ignored test entries are subprocess fixtures used by those integration
 tests, not additional manual checks.
 
 An additional opt-in integration test exercises the real winsh executable,
-including cancelling multiline input, interrupting a foreground native program,
-continuing afterward, and preserving the shell's exit status:
+including cancelling multiline input, interrupting foreground programs and a
+native pipeline, continuing afterward, and preserving the shell's exit status:
 
 ~~~powershell
 cargo build --workspace

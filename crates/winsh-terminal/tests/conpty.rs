@@ -205,6 +205,14 @@ fn winsh_interactive_smoke() {
     wait_for_prompt_count(&harness, prompts + 1);
     harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-" + "interrupt")'"#.iter().copied().chain([b'\r']).collect()).unwrap();
     harness.wait_for("after-interrupt");
+    // Interrupt both native pipeline stages, then verify another command runs.
+    harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("pipeline-" + "ready"); Start-Sleep 60' | powershell.exe -NoLogo -NoProfile -Command 'while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }'"#.iter().copied().chain([b'\r']).collect()).unwrap();
+    harness.wait_for("pipeline-ready");
+    let prompts = harness.contents().matches(" $ ").count();
+    harness.session.write(vec![3]).unwrap();
+    wait_for_prompt_count(&harness, prompts + 1);
+    harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-pipeline-" + "interrupt")'"#.iter().copied().chain([b'\r']).collect()).unwrap();
+    harness.wait_for("after-pipeline-interrupt");
     harness.session.write(b"exit 42\r".to_vec()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

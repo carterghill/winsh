@@ -5,7 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{ShellIo, builtins, exec, expand, platform, syntax};
+use crate::{
+    ShellIo, builtins, exec,
+    pipeline::{self, PreparedCommand},
+    platform, redirect, syntax,
+};
 
 /// A command result is distinct from an instruction to leave the input loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +27,7 @@ impl Outcome {
 }
 
 /// One shell session. Changing it never changes the host process's cwd or env.
+#[derive(Clone)]
 pub struct Shell {
     pub(crate) cwd: PathBuf,
     pub(crate) environment: Vec<(OsString, OsString)>,
@@ -68,11 +73,11 @@ impl Shell {
         &self.environment
     }
 
-    /// Parse and execute one command. Command and syntax failures are reported
-    /// through stderr and a shell status; Err is reserved for host I/O failures.
+    /// Parse and execute one foreground pipeline. Command and syntax failures
+    /// are reported through stderr and a status; Err is for host I/O failures.
     pub fn run(&mut self, source: &str, io: &mut ShellIo) -> io::Result<Outcome> {
-        match syntax::parse_simple_command(source) {
-            Ok(Some(command)) => self.execute(&command, io),
+        match syntax::parse_pipeline(source) {
+            Ok(Some(pipeline)) => self.execute_pipeline(&pipeline, io),
             Ok(None) => Ok(Outcome::Continue(self.last_status)),
             Err(error) => {
                 io.err(format_args!("winsh: {error}\n"))?;
@@ -87,19 +92,56 @@ impl Shell {
         command: &syntax::SimpleCommand,
         io: &mut ShellIo,
     ) -> io::Result<Outcome> {
-        let arguments = match expand::arguments(command, self) {
-            Ok(arguments) => arguments,
+        self.evaluate(std::slice::from_ref(command), &[], io)
+    }
+
+    pub fn execute_pipeline(
+        &mut self,
+        pipeline: &syntax::Pipeline,
+        io: &mut ShellIo,
+    ) -> io::Result<Outcome> {
+        self.evaluate(&pipeline.commands, &pipeline.connections, io)
+    }
+
+    fn evaluate(
+        &mut self,
+        commands: &[syntax::SimpleCommand],
+        connections: &[syntax::PipeKind],
+        io: &mut ShellIo,
+    ) -> io::Result<Outcome> {
+        if commands.is_empty() || connections.len() != commands.len() - 1 {
+            io.err(format_args!("winsh: invalid pipeline syntax tree\n"))?;
+            return Ok(self.record(Outcome::Continue(2)));
+        }
+        // Validate every argument and target before opening files or starting
+        // processes. Unsupported language syntax cannot cause partial execution.
+        let mut prepared = match commands
+            .iter()
+            .map(|command| PreparedCommand::expand(command, self))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(commands) => commands,
             Err(error) => {
                 io.err(format_args!("winsh: {error}\n"))?;
                 return Ok(self.record(Outcome::Continue(2)));
             }
         };
-        if arguments.is_empty() {
-            return Ok(Outcome::Continue(self.last_status));
-        }
-        let outcome = match builtins::dispatch(self, &arguments, io)? {
-            Some(outcome) => outcome,
-            None => Outcome::Continue(exec::run(self, &arguments, io)?),
+        let outcome = if prepared.len() > 1 {
+            Outcome::Continue(pipeline::run(self, prepared, connections, io)?)
+        } else {
+            let command = prepared.pop().unwrap();
+            let mut streams = io.try_clone()?;
+            if !redirect::apply(self, &command.redirects, &mut streams)? {
+                Outcome::Continue(1)
+            } else if let Some(name) = command.arguments.first() {
+                if builtins::recognizes(name) {
+                    pipeline::builtin(self, &command.arguments, &mut streams)
+                } else {
+                    Outcome::Continue(exec::run(self, &command.arguments, &mut streams)?)
+                }
+            } else {
+                Outcome::Continue(0)
+            }
         };
         Ok(self.record(outcome))
     }

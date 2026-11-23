@@ -2,7 +2,7 @@ use std::{ffi::OsString, fmt, ops::Range};
 
 use crate::{
     Shell,
-    syntax::{SimpleCommand, WordPart, WordPartKind},
+    syntax::{SimpleCommand, Word, WordPart, WordPartKind},
 };
 
 pub(crate) struct ExpansionError {
@@ -26,45 +26,43 @@ pub(crate) fn arguments(
     command: &SimpleCommand,
     shell: &Shell,
 ) -> Result<Vec<OsString>, ExpansionError> {
-    command
-        .words
-        .iter()
-        .map(|word| {
-            let mut result = OsString::new();
-            for (index, part) in word.parts.iter().enumerate() {
-                if index == 0
-                    && let WordPartKind::Text(text) = &part.kind
-                    && text.starts_with('~')
-                {
-                    let rest = if let Some(rest) = text.strip_prefix("~/") {
-                        Some(format!("/{rest}"))
-                    } else if text == "~" && word.parts.len() == 1 {
-                        Some(String::new())
-                    } else {
-                        None
-                    };
-                    if let Some(rest) = rest {
-                        let home = shell
-                            .home()
-                            .ok_or_else(|| unsupported(part, "HOME is not set"))?;
-                        check_text(&rest, false, part)?;
-                        result.push(home);
-                        result.push(rest);
-                        continue;
-                    }
-                    // Quoting a tilde prefix inhibits its expansion.
-                    if text != "~" {
-                        return Err(unsupported(
-                            part,
-                            "named-user tilde expansion is not supported yet",
-                        ));
-                    }
-                }
-                append(part, false, &mut result)?;
+    command.words.iter().map(|item| word(item, shell)).collect()
+}
+
+pub(crate) fn word(word: &Word, shell: &Shell) -> Result<OsString, ExpansionError> {
+    let mut result = OsString::new();
+    for (index, part) in word.parts.iter().enumerate() {
+        if index == 0
+            && let WordPartKind::Text(text) = &part.kind
+            && text.starts_with('~')
+        {
+            let rest = if let Some(rest) = text.strip_prefix("~/") {
+                Some(format!("/{rest}"))
+            } else if text == "~" && word.parts.len() == 1 {
+                Some(String::new())
+            } else {
+                None
+            };
+            if let Some(rest) = rest {
+                let home = shell
+                    .home()
+                    .ok_or_else(|| unsupported(part, "HOME is not set"))?;
+                check_text(&rest, false, part)?;
+                result.push(home);
+                result.push(rest);
+                continue;
             }
-            Ok(result)
-        })
-        .collect()
+            // Quoting a tilde prefix inhibits its expansion.
+            if text != "~" {
+                return Err(unsupported(
+                    part,
+                    "named-user tilde expansion is not supported yet",
+                ));
+            }
+        }
+        append(part, false, &mut result)?;
+    }
+    Ok(result)
 }
 
 fn append(part: &WordPart, quoted: bool, result: &mut OsString) -> Result<(), ExpansionError> {

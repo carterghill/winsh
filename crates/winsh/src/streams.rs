@@ -9,6 +9,7 @@ use std::{
 /// remember their original descriptor so `2>&1` can snapshot stdout correctly.
 pub struct ShellIo {
     streams: [Stream; 3],
+    stderr_redirected: bool,
 }
 
 pub(crate) enum Stream {
@@ -27,6 +28,7 @@ impl Default for ShellIo {
                 Stream::Inherited(1),
                 Stream::Inherited(2),
             ],
+            stderr_redirected: false,
         }
     }
 }
@@ -56,6 +58,7 @@ impl ShellIo {
                 self.streams[1].try_clone()?,
                 self.streams[2].try_clone()?,
             ],
+            stderr_redirected: self.stderr_redirected,
         })
     }
 
@@ -65,6 +68,9 @@ impl ShellIo {
             .get_mut(usize::from(descriptor))
             .ok_or_else(bad_descriptor)?;
         *slot = stream;
+        if descriptor == 2 {
+            self.stderr_redirected = true;
+        }
         Ok(())
     }
 
@@ -84,12 +90,12 @@ impl ShellIo {
         self.streams[1].write(args)
     }
     pub(crate) fn err(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
-        // Closing stderr suppresses diagnostics without changing a command's
-        // status or turning `exit` into an engine I/O failure.
-        if matches!(self.streams[2], Stream::Closed) {
-            return Ok(());
+        match self.streams[2].write(args) {
+            // A command can close stderr or redirect it to an unwritable stream.
+            // Preserve its status while still reporting failures on host stderr.
+            Err(_) if self.stderr_redirected => Ok(()),
+            result => result,
         }
-        self.streams[2].write(args)
     }
 
     pub(crate) fn configure(&self, command: &mut Command) -> io::Result<()> {

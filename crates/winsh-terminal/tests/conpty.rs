@@ -5,6 +5,7 @@ use std::{
     env,
     ffi::OsString,
     io::{self, BufRead, IsTerminal, Write},
+    path::Path,
     process::Command,
     sync::{Arc, Mutex},
     thread,
@@ -57,6 +58,12 @@ impl Harness {
 
     fn contents(&self) -> String {
         self.terminal.lock().unwrap().screen().contents()
+    }
+
+    fn enter(&self, command: &str) {
+        self.session
+            .write(format!("{command}\r").into_bytes())
+            .unwrap();
     }
 
     fn wait_for(&self, text: &str) {
@@ -172,13 +179,7 @@ fn failed_process_start_returns_an_error_without_hanging() {
 #[test]
 #[ignore = "requires cargo build --workspace in the same target directory"]
 fn winsh_interactive_smoke() {
-    let executable = env::current_exe().unwrap();
-    let shell = executable
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("winsh.exe");
+    let shell = Path::new(env!("CARGO_BIN_EXE_winsh-terminal")).with_file_name("winsh.exe");
     assert!(
         shell.is_file(),
         "build the workspace first: {}",
@@ -190,30 +191,33 @@ fn winsh_interactive_smoke() {
     harness.wait_for(" $ ");
 
     // Cancel an unfinished quoted command, then run a native foreground child.
-    harness
-        .session
-        .write(b"pwd 'unfinished\r".to_vec())
-        .unwrap();
+    harness.enter("pwd 'unfinished");
     harness.wait_for("> ");
     let prompts = harness.contents().matches(" $ ").count();
     harness.session.write(vec![3]).unwrap();
     wait_for_prompt_count(&harness, prompts + 1);
-    harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("foreground-" + "ready"); Start-Sleep 60'"#.iter().copied().chain([b'\r']).collect()).unwrap();
+    harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("foreground-" + "ready"); Start-Sleep 60'"#);
     harness.wait_for("foreground-ready");
     let prompts = harness.contents().matches(" $ ").count();
     harness.session.write(vec![3]).unwrap();
     wait_for_prompt_count(&harness, prompts + 1);
-    harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-" + "interrupt")'"#.iter().copied().chain([b'\r']).collect()).unwrap();
+    harness.enter(
+        r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-" + "interrupt")'"#,
+    );
     harness.wait_for("after-interrupt");
     // Interrupt both native pipeline stages, then verify another command runs.
-    harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("pipeline-" + "ready"); Start-Sleep 60' | powershell.exe -NoLogo -NoProfile -Command 'while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }'"#.iter().copied().chain([b'\r']).collect()).unwrap();
+    harness.enter(concat!(
+        r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("pipeline-" + "ready"); Start-Sleep 60'"#,
+        " | powershell.exe -NoLogo -NoProfile -Command ",
+        "'while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }'",
+    ));
     harness.wait_for("pipeline-ready");
     let prompts = harness.contents().matches(" $ ").count();
     harness.session.write(vec![3]).unwrap();
     wait_for_prompt_count(&harness, prompts + 1);
-    harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-pipeline-" + "interrupt")'"#.iter().copied().chain([b'\r']).collect()).unwrap();
+    harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-pipeline-" + "interrupt")'"#);
     harness.wait_for("after-pipeline-interrupt");
-    harness.session.write(b"exit 42\r".to_vec()).unwrap();
+    harness.enter("exit 42");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match harness.session.try_event() {

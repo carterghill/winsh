@@ -140,7 +140,8 @@ Redirections run from left to right. `program >all 2>&1` puts both outputs in
 stdout to `out`. A failed open or duplication returns 1 and prevents that command
 from running. Earlier file opens can already have created or truncated files.
 Earlier stderr redirections also govern subsequent redirection diagnostics.
-Closing stderr suppresses diagnostics while preserving the command's status.
+If a command closes stderr or redirects it to a read-only file, a failed
+diagnostic write preserves the command's status and the session can continue.
 For native programs, closed streams are represented by inaccessible handles;
 reads or writes fail rather than silently reading from or writing to NUL.
 

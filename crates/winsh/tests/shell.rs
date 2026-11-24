@@ -685,6 +685,27 @@ fn failed_redirections_prevent_builtins_and_use_previously_redirected_stderr() {
 }
 
 #[test]
+fn unwritable_redirected_stderr_preserves_command_and_pipeline_status() {
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("input"), b"preserved").unwrap();
+    assert_eq!(
+        f.run("exit 42 2<input >missing/output"),
+        Outcome::Continue(1)
+    );
+    assert_eq!(
+        f.run("pwd 2<input >missing/output | exit 7"),
+        Outcome::Continue(7)
+    );
+    assert_eq!(
+        f.run("missing-winsh-command 2<input"),
+        Outcome::Continue(127)
+    );
+    assert_eq!(f.run("exit bad 2<input"), Outcome::Exit(2));
+    assert_eq!(fs::read(f.root.0.join("input")).unwrap(), b"preserved");
+    assert!(f.err().is_empty());
+}
+
+#[test]
 fn unsupported_expansions_are_validated_before_pipeline_side_effects() {
     let mut f = Fixture::new();
     for source in [

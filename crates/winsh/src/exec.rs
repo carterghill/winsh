@@ -105,6 +105,9 @@ pub(crate) fn spawn(
         let mut child = Shell::with_environment(shell.cwd.clone(), shell.environment.clone())?;
         child.source_depth = shell.source_depth + 1;
         child.cancellation = shell.cancellation.clone();
+        child
+            .utility_executable
+            .clone_from(&shell.utility_executable);
         child.set_arguments(program.clone(), arguments[1..].to_vec());
         let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
         return Ok(Spawned::Complete(child.run(&source, io)?.status()));

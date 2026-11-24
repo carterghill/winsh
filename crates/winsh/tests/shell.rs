@@ -865,6 +865,166 @@ fn builtin_output_write_errors_fail_the_command_and_keep_the_session_alive() {
 }
 
 #[test]
+fn ls_lists_session_paths_without_path_tools() {
+    let mut f = Fixture::new();
+    let work = f.root.0.join("work");
+    fs::create_dir(&work).unwrap();
+    fs::create_dir(work.join("sub")).unwrap();
+    for name in [".hidden", "-dash", "spaced file", "sub/child"] {
+        fs::write(work.join(name), b"").unwrap();
+    }
+    assert_eq!(f.run("PATH=''; cd work; ls | cat").status(), 0);
+    assert_eq!(f.out(), "-dash\nspaced file\nsub\n");
+    assert_eq!(f.run("ls -A1 >../almost").status(), 0);
+    assert_eq!(
+        fs::read(f.root.0.join("almost")).unwrap(),
+        b"-dash\n.hidden\nspaced file\nsub\n"
+    );
+    assert_eq!(f.run("ls -a sub >../all").status(), 0);
+    assert_eq!(fs::read(f.root.0.join("all")).unwrap(), b".\n..\nchild\n");
+    assert_eq!(f.run("ls -d -- sub -dash >../dirs").status(), 0);
+    assert_eq!(fs::read(f.root.0.join("dirs")).unwrap(), b"-dash\nsub\n");
+    assert_eq!(f.run("ls missing sub 'spaced file' >../mixed").status(), 2);
+    assert_eq!(
+        fs::read(f.root.0.join("mixed")).unwrap(),
+        b"spaced file\n\nsub:\nchild\n"
+    );
+    assert!(f.err().contains("missing"));
+    assert_eq!(f.run("ls -Z").status(), 2);
+}
+
+#[test]
+fn cat_streams_binary_data_and_numbers_across_operands() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.root.0.join("work")).unwrap();
+    assert_eq!(f.run("cd work; PATH=''").status(), 0);
+    let dir = f.shell.cwd().to_owned();
+    let binary: Vec<u8> = (0..=255).cycle().take(1_000_000).collect();
+    fs::write(dir.join("part one"), &binary).unwrap();
+    fs::write(dir.join("-tail"), b"\0\xff\r\n").unwrap();
+    fs::write(dir.join("stdin"), b"middle").unwrap();
+    assert_eq!(
+        f.run("cat -- 'part one' - -tail <stdin | cat >joined")
+            .status(),
+        0
+    );
+    assert_eq!(
+        fs::read(dir.join("joined")).unwrap(),
+        [binary.as_slice(), b"middle\0\xff\r\n"].concat()
+    );
+    fs::write(dir.join("first"), b"\npartial").unwrap();
+    fs::write(dir.join("second"), b" line\n\nlast").unwrap();
+    assert_eq!(f.run("cat -nb first second").status(), 0);
+    assert_eq!(f.out(), "\n     1\tpartial line\n\n     2\tlast");
+    assert_eq!(f.run("cat -n first >numbered").status(), 0);
+    assert_eq!(
+        fs::read(dir.join("numbered")).unwrap(),
+        b"     1\t\n     2\tpartial"
+    );
+    assert_eq!(f.run("cat missing second >rest").status(), 1);
+    assert_eq!(fs::read(dir.join("rest")).unwrap(), b" line\n\nlast");
+    assert!(f.err().contains("missing"));
+    assert_eq!(f.run("cat -X").status(), 1);
+}
+
+#[test]
+fn grep_selects_lines_counts_files_and_preserves_statuses() {
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("one"), b"ok\r\nError 42\r\nwarning\nError+").unwrap();
+    fs::write(f.root.0.join("two"), b"error 3\n\xfferror 4\n").unwrap();
+    assert_eq!(
+        f.run("grep -inE '^error [[:digit:]]+$' one two").status(),
+        0
+    );
+    assert_eq!(f.out(), "one:2:Error 42\r\ntwo:1:error 3\n");
+    assert_eq!(
+        f.run("grep -ivc -e error -e warning one two >counts")
+            .status(),
+        0
+    );
+    assert_eq!(
+        fs::read(f.root.0.join("counts")).unwrap(),
+        b"one:1\ntwo:0\n"
+    );
+    assert_eq!(f.run("grep 'Error+' one >basic").status(), 0);
+    assert_eq!(fs::read(f.root.0.join("basic")).unwrap(), b"Error+\n");
+    assert_eq!(f.run("grep -F '[abc]' one").status(), 1);
+    assert_eq!(f.run("grep -F error two >bytes").status(), 0);
+    assert_eq!(
+        fs::read(f.root.0.join("bytes")).unwrap(),
+        b"error 3\n\xfferror 4\n"
+    );
+    assert_eq!(f.run("grep -c absent one >count").status(), 1);
+    assert_eq!(fs::read(f.root.0.join("count")).unwrap(), b"0\n");
+    assert_eq!(f.run("grep -q Error missing one").status(), 0);
+    assert_eq!(f.run("grep -q absent missing one").status(), 2);
+    assert_eq!(f.run("grep -h Error missing one >rest").status(), 2);
+    assert_eq!(
+        fs::read(f.root.0.join("rest")).unwrap(),
+        b"Error 42\r\nError+\n"
+    );
+    for source in [
+        "grep",
+        "grep -e",
+        "grep -Z word",
+        "grep '[' one",
+        "grep -EF x one",
+        "grep Error one >&-",
+    ] {
+        assert_eq!(f.run(source).status(), 2, "{source}");
+    }
+}
+
+#[test]
+fn streaming_utilities_reject_their_own_output() {
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("input"), b"").unwrap();
+    fs::hard_link(f.root.0.join("input"), f.root.0.join("alias")).unwrap();
+    // Run in a bounded child so a regression cannot hang the suite.
+    let cwd = quote(&f.root.0);
+    for (source, status) in [
+        ("cat alias >>input", 1),
+        ("cat <alias >>input", 1),
+        ("grep match alias >>input", 2),
+    ] {
+        let output = cli_bounded(&format!("cd {cwd}; {source}"));
+        assert_eq!(output.status.code(), Some(status));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("also the output file"));
+        assert_eq!(fs::read(f.root.0.join("input")).unwrap(), b"");
+    }
+    fs::write(f.root.0.join("input"), b"match\n").unwrap();
+    assert_eq!(f.run("grep -q match input >>alias").status(), 0);
+}
+
+#[test]
+fn bundled_utilities_run_in_script_files_without_path_tools() {
+    let root = TempDir::new();
+    let script = root.0.join("combine.sh");
+    fs::write(
+        &script,
+        "PATH=''\ncd \"$1\"\ncat -- 'first log' - 'last log'\n",
+    )
+    .unwrap();
+    fs::write(root.0.join("first log"), b"info start\n").unwrap();
+    fs::write(root.0.join("last log"), b"ERROR finish\n").unwrap();
+    let args = [script.to_str().unwrap(), root.0.to_str().unwrap()];
+    let combined = cli(&args, b"Error middle\n");
+    assert_eq!(combined.status.code(), Some(0));
+    assert_eq!(combined.stdout, b"info start\nError middle\nERROR finish\n");
+    let script = root.0.join("scan.sh");
+    fs::write(&script, "PATH=''\nif grep -qi error \"$1\"; then\n  cat -- \"$1\" | grep -in '^error'\nelse\n  exit 7\nfi\n").unwrap();
+    let log = root.0.join("combined");
+    fs::write(&log, combined.stdout).unwrap();
+    let args = [script.to_str().unwrap(), log.to_str().unwrap()];
+    let filtered = cli(&args, b"");
+    assert_eq!(filtered.status.code(), Some(0));
+    assert_eq!(filtered.stdout, b"2:Error middle\n3:ERROR finish\n");
+    assert!(filtered.stderr.is_empty());
+    fs::write(&log, b"ok\n").unwrap();
+    assert_eq!(cli(&args, b"").status.code(), Some(7));
+}
+
+#[test]
 fn pipelines_stream_large_binary_output_through_all_stages() {
     let f = Fixture::new();
     let child = quote(helper());
@@ -1103,6 +1263,13 @@ fn redirections_and_pipelines_match_bash() {
         format!("{child} status 0 1>&0"),
         format!("{child} status 0 1>&- 2>&-"),
         format!("exit 7 | {child} status 0"),
+        "PATH=/usr/bin:/bin; cat -- input - a <a >b".to_owned(),
+        r"PATH=/usr/bin:/bin; printf '\nfirst\n\nlast' | cat -bn".to_owned(),
+        r"PATH=/usr/bin:/bin; printf 'ok\nError 42\nerror 3\n' | grep -inE '^error [[:digit:]]+$'"
+            .to_owned(),
+        r"PATH=/usr/bin:/bin; printf 'a+b\nab\naab\n' | grep -n 'a\+b'".to_owned(),
+        r"PATH=/usr/bin:/bin; printf 'a+b\nab\naab\n' | grep -n 'a+b'".to_owned(),
+        "PATH=/usr/bin:/bin; grep -Fc missing a".to_owned(),
         "cd missing 1>a 2>&1-".to_owned(),
         ">a".to_owned(),
     ];

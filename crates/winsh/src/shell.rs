@@ -1,5 +1,5 @@
 use crate::{
-    ShellIo, builtins, exec, expand, pipeline, platform, redirect,
+    ShellIo, Utility, builtins, exec, expand, pipeline, platform, redirect,
     streams::Stream,
     syntax::{self, Command, CommandKind, Script, ScriptPipeline, Word, WordPartKind},
 };
@@ -52,6 +52,7 @@ pub struct Shell {
     pub(crate) scopes: Vec<BTreeMap<String, SavedVariable>>,
     pub(crate) substitution_status: Option<i32>,
     pub(crate) cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) utility_executable: Option<PathBuf>,
     capture_depth: usize,
     script_depth: usize,
     abort_script: bool,
@@ -89,6 +90,7 @@ impl Shell {
             script_depth: 0,
             abort_script: false,
             cancellation: None,
+            utility_executable: None,
             last_status: 0,
         };
         shell.set_env("PWD", shell.cwd.clone().into_os_string());
@@ -96,6 +98,11 @@ impl Shell {
     }
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+    /// Use a winsh executable for utility commands so foreground cancellation
+    /// is handled by the OS. Embedded sessions run utilities directly by default.
+    pub fn set_utility_executable(&mut self, executable: PathBuf) {
+        self.utility_executable = Some(executable);
     }
     pub fn last_status(&self) -> i32 {
         self.last_status
@@ -394,6 +401,15 @@ impl Shell {
             result
         } else if builtins::recognizes(name) {
             Ok(pipeline::builtin(self, arguments, io))
+        } else if let Some(utility) = Utility::from_name(name) {
+            let status = if let Some(executable) = &self.utility_executable {
+                let mut child_args = vec![executable.as_os_str().to_owned(), "--utility".into()];
+                child_args.extend_from_slice(arguments);
+                exec::run(self, &child_args, io)?
+            } else {
+                utility.run(self, &arguments[1..], io)?
+            };
+            Ok(Outcome::Continue(status))
         } else {
             Ok(Outcome::Continue(exec::run(self, arguments, io)?))
         }

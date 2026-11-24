@@ -4,7 +4,7 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 
-use winsh::{Outcome, Shell, ShellIo, syntax::parse_script};
+use winsh::{Outcome, Shell, ShellIo, Utility, syntax::parse_script};
 
 mod console;
 
@@ -13,6 +13,7 @@ const HELP: &str = "A native Windows shell with Bash-compatible syntax.
 Usage: winsh [--help | --version]
        winsh -c <command> [name [arguments...]]
        winsh [--] <script> [arguments...]
+       winsh --utility <cat|grep|ls> [arguments...]
 
 With no arguments, read commands from the terminal or standard input.
 
@@ -27,6 +28,7 @@ redirections, pipelines, and native executables. See docs/shell.md for limits.";
 enum Mode {
     Input,
     Command(String, Vec<OsString>),
+    Utility(Utility, Vec<OsString>),
     Script(OsString, Vec<OsString>),
     Help,
     Version,
@@ -39,6 +41,14 @@ fn options(mut args: impl Iterator<Item = OsString>) -> Result<Mode, &'static st
     let mode = match first.to_str() {
         Some("-h" | "--help") => Mode::Help,
         Some("-V" | "--version") => Mode::Version,
+        Some("--utility") => {
+            let utility = args
+                .next()
+                .as_deref()
+                .and_then(Utility::from_name)
+                .ok_or("--utility expects cat, grep, or ls")?;
+            return Ok(Mode::Utility(utility, args.collect()));
+        }
         Some("-c") => {
             let command = args.next().ok_or("-c requires a command string")?;
             return Ok(Mode::Command(
@@ -96,8 +106,12 @@ fn run() -> io::Result<i32> {
     }
     let mut shell = Shell::new()?;
     let mut streams = ShellIo::inherited();
+    if let Mode::Utility(utility, args) = mode {
+        return utility.run(&shell, &args, &mut streams);
+    }
     let interactive = io::stdin().is_terminal();
     let _handler = if interactive {
+        shell.set_utility_executable(env::current_exe()?);
         Some(console::Handler::install()?)
     } else {
         None
@@ -124,8 +138,13 @@ fn run() -> io::Result<i32> {
             let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
             Ok(shell.run(&source, &mut streams)?.status())
         }
-        Mode::Input => input_loop(&mut shell, &mut streams, interactive),
-        Mode::Help | Mode::Version => unreachable!(),
+        Mode::Input => {
+            if interactive && let Ok(label) = env::var("WINSH_DEV_BUILD") {
+                writeln!(io::stderr(), "winsh dev build {label}")?;
+            }
+            input_loop(&mut shell, &mut streams, interactive)
+        }
+        Mode::Utility(..) | Mode::Help | Mode::Version => unreachable!(),
     }
 }
 

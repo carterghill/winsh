@@ -1,9 +1,14 @@
 use std::{
     fmt,
     fs::File,
-    io::{self, PipeReader, PipeWriter, Read, Write},
+    io::{self, IsTerminal, PipeReader, PipeWriter, Read, Write},
     process::{Command, Stdio},
 };
+
+#[cfg(unix)]
+use std::os::fd::OwnedFd as OwnedIo;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle as OwnedIo;
 
 /// Explicit streams for both built-ins and native programs. Inherited streams
 /// remember their original descriptor so `2>&1` can snapshot stdout correctly.
@@ -87,7 +92,28 @@ impl ShellIo {
     }
 
     pub(crate) fn out(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
-        self.streams[1].write(args)
+        self.streams[1].write_fmt(args)
+    }
+    pub(crate) fn output(&mut self) -> &mut dyn Write {
+        &mut self.streams[1]
+    }
+    pub(crate) fn inherits_console_input(&self) -> bool {
+        matches!(self.streams[0], Stream::Inherited(0)) && io::stdin().is_terminal()
+    }
+    pub(crate) fn input_file(&self) -> io::Result<File> {
+        match &self.streams[0] {
+            Stream::Inherited(fd) => inherited_file(*fd),
+            Stream::File(file) => file.try_clone(),
+            Stream::Reader(pipe) => Ok(File::from(OwnedIo::from(pipe.try_clone()?))),
+            _ => Err(bad_descriptor()),
+        }
+    }
+    pub(crate) fn output_file(&self) -> io::Result<Option<File>> {
+        match &self.streams[1] {
+            Stream::File(file) => file.try_clone().map(Some),
+            Stream::Inherited(fd) => inherited_file(*fd).map(Some),
+            _ => Ok(None),
+        }
     }
     pub(crate) fn read_byte(&mut self) -> io::Result<Option<u8>> {
         let mut byte = [0];
@@ -100,7 +126,7 @@ impl ShellIo {
         Ok(if count == 0 { None } else { Some(byte[0]) })
     }
     pub(crate) fn err(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
-        match self.streams[2].write(args) {
+        match self.streams[2].write_fmt(args) {
             // A command can close stderr or redirect it to an unwritable stream.
             // Preserve its status while still reporting failures on host stderr.
             Err(_) if self.stderr_redirected => Ok(()),
@@ -152,8 +178,29 @@ impl Stream {
             Self::Writer(pipe) => pipe.try_clone()?.into(),
         })
     }
+}
 
-    fn write(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
+impl Write for Stream {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Inherited(1) => io::stdout().write(bytes),
+            Self::Inherited(2) => io::stderr().write(bytes),
+            Self::Inherited(fd) => inherited_file(*fd)?.write(bytes),
+            Self::File(file) => file.write(bytes),
+            Self::Writer(pipe) => pipe.write(bytes),
+            Self::Closed | Self::Reader(_) => Err(bad_descriptor()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Inherited(1) => io::stdout().flush(),
+            Self::Inherited(2) => io::stderr().flush(),
+            _ => Ok(()),
+        }
+    }
+
+    fn write_fmt(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
         match self {
             Self::Closed => Err(bad_descriptor()),
             Self::Inherited(1) => io::stdout().write_fmt(args),

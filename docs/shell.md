@@ -106,6 +106,47 @@ Invalid numeric exit arguments terminate with 2; extra arguments after a valid
 number report 1 and keep the input loop running. This last behavior currently
 also applies to redirected input, unlike Bash's noninteractive exit handling.
 
+## File utilities
+
+`ls`, `cat`, and `grep` are bundled with winsh. A shell function of the same name
+takes precedence. Use an explicit path to run another version. File operands
+resolve against the shell's working directory. `cat` and `grep` read stdin when
+given no file operands or when an operand is `-`. Put options before operands
+and use `--` to end option parsing.
+
+~~~sh
+cat -- 'part one.txt' - 'part three.txt' <middle.txt >combined.txt
+grep -inE '^(warn|error)' combined.txt
+if grep -Fq 'build failed' combined.txt; then echo 'check the build log'; fi
+~~~
+
+| Command | Supported behavior |
+| --- | --- |
+| `ls [-1aAd] [PATH ...]` | List the current directory by default. Print sorted names, one per line. `-A` includes dotfiles and `-a` also includes `.` and `..`. With `-d`, print directory operands themselves. |
+| `cat [-bnu] [FILE ...]` | Copy bytes in order, including NULs, CRLF and a partial final line. `-n` numbers all lines, `-b` numbers nonempty lines and overrides `-n`. Numbering continues across files. `-u` requests immediate output, which is already the default. |
+| `grep [OPTIONS] PATTERN [FILE ...]` | Select matching lines. The default supports common basic regular expressions, including anchors, dot, bracket classes, star and escaped groups or repetitions. `-E` enables extended operators such as `(a|b)+`. `-F` treats the pattern as literal text. |
+| `grep -e PATTERN` | Supply a pattern beginning with a dash or repeat `-e` for alternatives. Newline-separated patterns also select any match. |
+| `grep -i -v -n` | Ignore case, invert selection, or prefix each selected line with its 1-based line number. Short flags can be combined. |
+| `grep -c -q -H -h` | `-c` prints a selected-line count per file. `-q` stops at the first selected line and suppresses normal output. Multiple files get filename prefixes by default. `-H` forces prefixes and `-h` suppresses them. |
+
+`ls` exits with 0 on success, 1 for an error reading a directory entry, and 2 for an invalid option, inaccessible operand, or output error.
+`cat` exits with 0 on success and 1 on error. `grep` exits with 0 if it selects
+any line, 1 for no selected lines, and 2 for invalid patterns, options or I/O
+errors. Both report unreadable files on stderr and continue with later files.
+With `grep -q`, finding a match returns 0 even after an earlier file error.
+Streaming a regular file back into itself, including through a hard link,
+produces an error. Shell redirections take effect before the utility starts.
+
+`grep` processes one line at a time, treats LF and CRLF as line endings for
+matching, preserves selected bytes, and appends LF to a selected unterminated
+last line. Patterns are UTF-8 and `-i` uses Unicode case folding. Binary data
+uses the same line rules. Backreferences, locale-specific collation, recursion
+through directories, and GNU long options are outside this subset.
+
+The interactive Windows shell runs a utility as a foreground child so Ctrl+C
+returns to the prompt. PowerShell can invoke the same implementation directly
+with `winsh --utility cat FILE` or `winsh --utility grep PATTERN FILE`.
+
 ## Redirections and pipelines
 
 Redirections apply to built-ins, native programs, and commands inside pipelines.
@@ -277,8 +318,8 @@ special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devi
 such as `NUL` where appropriate.
 
 There is no arbitrary shebang dispatch, CDPATH lookup, history,
-completion, configurable prompt, background jobs, or winsh implementation of
-cat/grep/ls yet. Windows Ctrl+C support covers foreground execution; Unix signal
+completion, configurable prompt, or background jobs yet.
+Windows Ctrl+C support covers foreground execution; Unix signal
 and job-control integration is deferred.
 
 ## Following a command through the code
@@ -307,6 +348,7 @@ The public engine interface consists of:
   for embedding. The same stream model serves built-ins and children.
 - `Outcome` distinguishes `Continue(status)` from `Exit(status)`. Only the CLI
   calls `std::process::exit`, so executing exit cannot terminate a library host.
+- `Utility` runs bundled file utilities with explicit session paths and I/O.
 
 `Shell::run` parses a script, `execute_script` evaluates an already parsed script,
 `execute_pipeline` accepts the earlier simple-pipeline AST, and `execute` remains

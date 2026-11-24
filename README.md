@@ -14,6 +14,17 @@ It implements a documented subset of Bash syntax on Windows.
 
 ## Try it
 
+For development on Windows, start the watched terminal from PowerShell at the repo root.
+
+~~~powershell
+.\dev.cmd
+~~~
+
+Save a Rust source file to rebuild the shell and terminal. PowerShell shows
+Cargo's progress and errors. When the binaries change, the watcher opens a fresh
+terminal with a timestamped build number above the prompt. Type `exit` in the
+dev terminal to stop watching. [Development terminal details](docs/terminal.md#automatic-rebuilds)
+
 Start winsh inside your current terminal:
 
 ~~~powershell
@@ -24,6 +35,8 @@ Then enter commands in winsh:
 
 ~~~sh
 pwd
+ls
+cat Cargo.toml
 cd crates/winsh/src
 pwd
 cd -
@@ -51,6 +64,7 @@ Inside winsh, redirections and pipelines work for built-ins and native programs:
 pwd >location.txt
 pwd >>location.txt
 sort.exe <location.txt | findstr.exe winsh >matches.txt
+cat README.md | grep -in 'windows'
 program.exe >output.txt 2>errors.txt
 program.exe >combined.txt 2>&1
 program.exe |& findstr.exe error
@@ -58,6 +72,10 @@ program.exe |& findstr.exe error
 
 See [redirections and pipelines](docs/shell.md#redirections-and-pipelines) for
 descriptor handling, exit statuses, and the supported subset.
+
+`ls`, `cat`, and `grep` ship inside `winsh.exe`. Use them at the prompt or in a script,
+or run `cargo run -- --utility grep -in windows README.md` from PowerShell.
+See the [utility options and exit statuses](docs/shell.md#file-utilities).
 
 Scripts use the same engine as the prompt. For example:
 
@@ -129,9 +147,9 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace --all-targets
 ~~~
 
-The shell's only direct dependency is `windows-sys`, enabled on Windows for
-console input, Ctrl+C handling, and suppressing OS error dialogs during process
-launch. The parser and engine otherwise use Rust's standard library. The
+The shell uses `regex` for grep patterns and `same-file` to identify aliased
+input and output files. On Windows, `windows-sys` handles console input,
+Ctrl+C and suppressing OS error dialogs during process launch. The
 terminal uses `windows-sys` for its native window, GDI rendering, and ConPTY,
 and `vt100` for terminal parsing and screen state.
 

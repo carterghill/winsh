@@ -25,7 +25,7 @@ behavioral reference; it is not required to execute commands.
 
 The Cargo workspace has sibling `winsh` and `winsh-terminal` packages. `winsh`
 contains an executable and an engine library. Its public interface is `syntax`,
-`Shell`, `ShellIo`, and `Outcome`. Implementation modules are private. The shell
+`Shell`, `ShellIo`, `Outcome`, and `Utility`. Implementation modules are private. The shell
 executable owns arguments, the input loop, console interaction, and the final
 process exit; the library owns shell behavior. The terminal has no dependency
 on the engine and launches the shell executable as a separate process.
@@ -40,6 +40,7 @@ on the engine and launches the shell executable as a separate process.
 | `pipeline` | Starting concurrent stages, isolated built-ins, and waiting for every stage. |
 | `redirect` | Opening files and applying descriptor changes in source order. |
 | `builtins` / `language_builtins` | Navigation, script state/control, tests, and basic text I/O. |
+| `utilities` | Directory listing, file concatenation, and line filtering with session paths and standard I/O. |
 | `platform` | Native paths, exit statuses, and process launch details. |
 | `streams` | Explicit standard I/O handles shared by built-ins and children. |
 | `console` | Executable-only console input and Windows Ctrl+C handling. |
@@ -53,6 +54,7 @@ CLI input (interactive, -c, or a script file)
     -> expand: construct arguments and redirection targets using session state
     -> streams: connect pipes and apply each stage's redirections
     -> builtins: operate on the session
+       OR utilities: run ls, cat, or grep
        OR exec: launch a native program
     -> Outcome: continue or exit, with a status
 ~~~
@@ -147,8 +149,9 @@ no shell framework, async runtime, or GUI toolkit dependency.
    local variables, source, tests, read, echo, and printf. Fixed fixtures compare
    each language category against Bash. See [the language guide](shell.md#scripts-and-language)
    for exact forms, Windows differences, and advanced Bash features still pending.
-6. Add compatible utilities such as cat and grep as scripts require them, with
-   documented supported options and failure behavior.
+6. **Implemented subset:** bundled ls, cat, and grep support directory listings,
+   file input, redirections, and pipelines. Script tests cover concatenation and log
+   filtering. See [file utilities](shell.md#file-utilities) for options and statuses.
 7. Improve editing, history, completion, and job control as separate shell
    features. Basic input currently uses the host console's line editing.
 

@@ -188,19 +188,21 @@ fn winsh_interactive_smoke() {
     let terminal = Arc::new(Mutex::new(Terminal::new(40, 160)));
     let session = Session::spawn(&shell, &[], 40, 160, Arc::clone(&terminal)).unwrap();
     let harness = Harness { session, terminal };
-    harness.wait_for(" $ ");
+    wait_for_prompt(&harness);
 
     // Cancel an unfinished quoted command, then run a native foreground child.
     harness.enter("pwd 'unfinished");
-    harness.wait_for("> ");
-    let prompts = harness.contents().matches(" $ ").count();
+    harness.wait_for("\n>");
+    // A painted prompt can precede the next console read. Wait for input echo
+    // before sending Ctrl+C so this exercises an active multiline read.
+    harness.session.write(b"pending-input".to_vec()).unwrap();
+    harness.wait_for("> pending-input");
     harness.session.write(vec![3]).unwrap();
-    wait_for_prompt_count(&harness, prompts + 1);
+    wait_for_prompt(&harness);
     harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("foreground-" + "ready"); Start-Sleep 60'"#);
     harness.wait_for("foreground-ready");
-    let prompts = harness.contents().matches(" $ ").count();
     harness.session.write(vec![3]).unwrap();
-    wait_for_prompt_count(&harness, prompts + 1);
+    wait_for_prompt(&harness);
     harness.enter(
         r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-" + "interrupt")'"#,
     );
@@ -212,9 +214,8 @@ fn winsh_interactive_smoke() {
         "'while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }'",
     ));
     harness.wait_for("pipeline-ready");
-    let prompts = harness.contents().matches(" $ ").count();
     harness.session.write(vec![3]).unwrap();
-    wait_for_prompt_count(&harness, prompts + 1);
+    wait_for_prompt(&harness);
     harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-pipeline-" + "interrupt")'"#);
     harness.wait_for("after-pipeline-interrupt");
     for line in [
@@ -228,6 +229,17 @@ fn winsh_interactive_smoke() {
         harness.enter(line);
     }
     harness.wait_for("language-passed");
+    harness.enter("PATH='' ls -d . | cat | grep -nF .");
+    harness.wait_for("1:.");
+    harness.enter(r"printf 'ok\nError from pipeline\n' | cat | grep -in '^error'");
+    harness.wait_for("2:Error from pipeline");
+    harness.enter("grep -n needle");
+    harness.enter("needle from console");
+    harness.wait_for("1:needle from console");
+    harness.session.write(vec![3]).unwrap();
+    wait_for_prompt(&harness);
+    harness.enter(r#"printf 'utility-status-%s\n' "$?""#);
+    harness.wait_for("utility-status-130");
     harness.enter("exit 42");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -244,12 +256,14 @@ fn winsh_interactive_smoke() {
     }
 }
 
-fn wait_for_prompt_count(harness: &Harness, count: usize) {
+fn wait_for_prompt(harness: &Harness) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while harness.contents().matches(" $ ").count() < count {
+    let prompt = format!("{} $", env::current_dir().unwrap().display());
+    // The terminal can trim trailing blank cells and scroll old prompts off screen.
+    while !harness.contents().trim_end().ends_with(&prompt) {
         assert!(
             Instant::now() < deadline,
-            "no prompt after interrupt; screen: {}",
+            "waiting for {prompt:?}; screen: {}",
             harness.contents()
         );
         thread::sleep(Duration::from_millis(10));

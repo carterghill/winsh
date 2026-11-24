@@ -13,6 +13,8 @@ mod platform;
 mod redirect;
 mod shell;
 mod streams;
+mod utilities;
 
 pub use shell::{Outcome, Shell};
 pub use streams::ShellIo;
+pub use utilities::Utility;

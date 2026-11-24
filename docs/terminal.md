@@ -29,6 +29,26 @@ Keep `winsh-terminal.exe` and `winsh.exe` together. The launcher resolves the
 default shell beside its own executable, independently of the working directory.
 The shell inherits the launcher's working directory and environment.
 
+## Automatic rebuilds
+
+Run `.\dev.cmd` from PowerShell at the repo root to start a dedicated development
+window. Its first prompt shows `winsh dev build #1` and the local time. The
+launching PowerShell shows compilation progress, diagnostics, and the terminal
+process ID after each launch.
+
+The watcher checks crate source directories, build scripts, Cargo manifests,
+`Cargo.lock`, the Rust toolchain file, and workspace Cargo configuration.
+It builds both binaries under `target\watch` and runs private copies so Windows
+can keep the current session open during compilation. A build error leaves that
+session available. The next edit retries the build.
+
+When a successful build changes either executable, the watcher opens a new
+session at the repo root and closes its previous window and foreground programs.
+Other winsh windows keep running their original binaries. Type `exit` in the
+watched window, close it, or press Ctrl+C in the watching PowerShell to stop.
+
+## Other shells and arguments
+
 To host another executable or pass shell arguments:
 
 ~~~powershell

@@ -21,6 +21,9 @@ fn main() {
             let value = env::var_os(args.next().unwrap()).unwrap();
             io::stdout().write_all(value.as_encoded_bytes()).unwrap();
         }
+        "env-optional" => {
+            if let Some(value) = env::var_os(args.next().unwrap()) { io::stdout().write_all(value.as_encoded_bytes()).unwrap(); }
+        }
         "status" => process::exit(args.next().unwrap().to_str().unwrap().parse().unwrap()),
         "both" => {
             print!("child stdout");
@@ -43,9 +46,9 @@ fn main() {
         "raw-stdout" => {
             raw_standard_file(false).write_all(b"raw output").unwrap();
         }
-        "generate" => {
+        mode @ ("generate"|"generate-text") => {
             let mut remaining: usize = args.next().unwrap().to_str().unwrap().parse().unwrap();
-            let bytes: Vec<_> = (0..8192).map(|index| (index % 256) as u8).collect();
+            let bytes: Vec<_> = (0..8192).map(|index| if mode == "generate-text" { b'x' } else { (index % 256) as u8 }).collect();
             let mut output = io::stdout().lock();
             while remaining > 0 {
                 let count = remaining.min(bytes.len());

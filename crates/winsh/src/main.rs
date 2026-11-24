@@ -4,30 +4,30 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 
-use winsh::{Outcome, Shell, ShellIo, syntax::parse_pipeline};
+use winsh::{Outcome, Shell, ShellIo, syntax::parse_script};
 
 mod console;
 
 const HELP: &str = "A native Windows shell with Bash-compatible syntax.
 
 Usage: winsh [--help | --version]
-       winsh -c <command>
+       winsh -c <command> [name [arguments...]]
+       winsh [--] <script> [arguments...]
 
 With no arguments, read commands from the terminal or standard input.
 
 Options:
-  -c            Execute one foreground pipeline and exit
+  -c            Execute a command string and exit
   -h, --help    Show this help
   -V, --version Show the version
 
-Built-ins: cd [-L|-P] [--] [directory|-], pwd [-L|-P], exit [status]
-Supports quoted words, escapes, ~/ paths, native executables, redirections,
-and streaming pipelines (| and |&).
-Variables, wildcards, command lists, and script-file arguments are not implemented yet.";
+Supports variables, expansions, lists, if/for/while/until, functions,
+redirections, pipelines, and native executables. See docs/shell.md for limits.";
 
 enum Mode {
     Input,
-    Command(String),
+    Command(String, Vec<OsString>),
+    Script(OsString, Vec<OsString>),
     Help,
     Version,
 }
@@ -41,13 +41,21 @@ fn options(mut args: impl Iterator<Item = OsString>) -> Result<Mode, &'static st
         Some("-V" | "--version") => Mode::Version,
         Some("-c") => {
             let command = args.next().ok_or("-c requires a command string")?;
-            Mode::Command(
+            return Ok(Mode::Command(
                 command
                     .into_string()
                     .map_err(|_| "command text must be valid UTF-8")?,
-            )
+                args.collect(),
+            ));
         }
-        _ => return Err("unsupported argument; see --help"),
+        Some("--") => {
+            return Ok(match args.next() {
+                Some(file) => Mode::Script(file, args.collect()),
+                None => Mode::Input,
+            });
+        }
+        Some(arg) if arg.starts_with('-') => return Err("unsupported option; see --help"),
+        _ => return Ok(Mode::Script(first, args.collect())),
     };
     if args.next().is_some() {
         return Err("unexpected extra argument; see --help");
@@ -95,7 +103,27 @@ fn run() -> io::Result<i32> {
         None
     };
     match mode {
-        Mode::Command(source) => Ok(shell.run(&source, &mut streams)?.status()),
+        Mode::Command(source, mut arguments) => {
+            let arg0 = if arguments.is_empty() {
+                "winsh".into()
+            } else {
+                arguments.remove(0)
+            };
+            shell.set_arguments(arg0, arguments);
+            Ok(shell.run(&source, &mut streams)?.status())
+        }
+        Mode::Script(file, arguments) => {
+            let source = match std::fs::read_to_string(&file) {
+                Ok(source) => source,
+                Err(error) => {
+                    writeln!(io::stderr(), "winsh: {}: {error}", file.to_string_lossy())?;
+                    return Ok(127);
+                }
+            };
+            shell.set_arguments(file, arguments);
+            let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+            Ok(shell.run(&source, &mut streams)?.status())
+        }
         Mode::Input => input_loop(&mut shell, &mut streams, interactive),
         Mode::Help | Mode::Version => unreachable!(),
     }
@@ -146,18 +174,17 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
             }
         }
         pending.push_str(&line);
-        match parse_pipeline(&pending) {
+        match parse_script(&pending) {
             Err(error) if error.is_incomplete() && newline => {
                 pending.push('\n');
                 continue;
             }
-            Ok(Some(command)) => {
-                let outcome = shell.execute_pipeline(&command, streams)?;
+            Ok(script) => {
+                let outcome = shell.execute_script(&script, streams)?;
                 if let Outcome::Exit(status) = outcome {
                     return Ok(status);
                 }
             }
-            Ok(None) => {}
             Err(_) => {
                 shell.run(&pending, streams)?;
                 if !interactive {

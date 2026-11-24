@@ -4,6 +4,7 @@ use crate::{Outcome, Shell, ShellIo, platform};
 
 pub(crate) fn recognizes(name: &std::ffi::OsStr) -> bool {
     matches!(name.to_str(), Some("cd" | "pwd" | "exit"))
+        || crate::language_builtins::recognizes(name)
 }
 
 pub(crate) fn dispatch(
@@ -16,6 +17,9 @@ pub(crate) fn dispatch(
         Some("pwd") => pwd(shell, args, io)?,
         Some("cd") => cd(shell, args, io)?,
         Some("exit") => exit(shell, args, io)?,
+        Some(name) if crate::language_builtins::recognizes(&arguments[0]) => {
+            crate::language_builtins::dispatch(shell, name, args, io)?
+        }
         _ => return Ok(None),
     };
     Ok(Some(outcome))
@@ -97,7 +101,7 @@ fn cd(shell: &mut Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<Outc
     let print = args.first().is_some_and(|arg| arg == "-");
     let target = match args.first() {
         Some(_) if print => {
-            let Some(previous) = shell.env("OLDPWD") else {
+            let Some(previous) = shell.var("OLDPWD") else {
                 return fail(io, "cd", "OLDPWD is not set", 1);
             };
             previous.to_owned()

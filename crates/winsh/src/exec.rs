@@ -38,7 +38,24 @@ impl Drop for ChildProcess {
 
 pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
     match spawn(shell, arguments, io)? {
-        Spawned::Running(mut child) => child.wait(),
+        Spawned::Running(mut child) => {
+            if let Some(cancel) = &shell.cancellation {
+                loop {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(io::Error::other(
+                            "pipeline cancelled after host I/O failure",
+                        ));
+                    }
+                    if let Some(status) = child.child.try_wait()? {
+                        child.waited = true;
+                        return Ok(platform::exit_status(status));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            } else {
+                child.wait()
+            }
+        }
         Spawned::Complete(status) => Ok(status),
     }
 }
@@ -65,6 +82,33 @@ pub(crate) fn spawn(
             ));
         }
     };
+    // .sh is winsh's explicit script dispatch policy. Never ask Windows file
+    // associations or another shell to reinterpret its source or arguments.
+    if executable
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sh"))
+    {
+        if shell.source_depth >= 32 {
+            io.err(format_args!("winsh: script nesting limit (32)\n"))?;
+            return Ok(Spawned::Complete(2));
+        }
+        let source = match fs::read_to_string(&executable) {
+            Ok(source) => source,
+            Err(error) => {
+                io.err(format_args!(
+                    "winsh: {}: {error}\n",
+                    program.to_string_lossy()
+                ))?;
+                return Ok(Spawned::Complete(126));
+            }
+        };
+        let mut child = Shell::with_environment(shell.cwd.clone(), shell.environment.clone())?;
+        child.source_depth = shell.source_depth + 1;
+        child.cancellation = shell.cancellation.clone();
+        child.set_arguments(program.clone(), arguments[1..].to_vec());
+        let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+        return Ok(Spawned::Complete(child.run(&source, io)?.status()));
+    }
     // Rust can implicitly invoke cmd.exe for batch files. Defer that separate
     // argument language until we implement and test an explicit batch policy.
     if cfg!(windows)

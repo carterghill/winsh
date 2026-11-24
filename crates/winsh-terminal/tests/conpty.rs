@@ -213,6 +213,8 @@ fn winsh_interactive_smoke() {
     wait_for_prompt_count(&harness, prompts + 1);
     harness.session.write(br#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-pipeline-" + "interrupt")'"#.iter().copied().chain([b'\r']).collect()).unwrap();
     harness.wait_for("after-pipeline-interrupt");
+    harness.session.write(b"check() {\rfor label in language; do\rprintf '%s-%s\\n' \"$label\" \"$1\"\rdone\r}\rcheck passed\r".to_vec()).unwrap();
+    harness.wait_for("language-passed");
     harness.session.write(b"exit 42\r".to_vec()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

@@ -15,6 +15,9 @@ fn quote_removed(parts: &[WordPart]) -> String {
             WordPartKind::Text(text) | WordPartKind::SingleQuoted(text) => result.push_str(text),
             WordPartKind::DoubleQuoted(parts) => result.push_str(&quote_removed(parts)),
             WordPartKind::Escaped(ch) => result.push(*ch),
+            WordPartKind::Parameter(text) => result.push_str(&format!("${{{text}}}")),
+            WordPartKind::CommandSubstitution(text) => result.push_str(&format!("$({text})")),
+            WordPartKind::Arithmetic(text) => result.push_str(&format!("$(({text}))")),
         }
     }
     result
@@ -253,30 +256,24 @@ fn rejects_operators_and_nested_syntax_before_it_can_be_misread_as_arguments() {
         "echo a &",
         "echo (a)",
         "echo )",
-        "echo $(date)",
-        "echo ${HOME}",
-        "echo $((1+2))",
         "echo $[1+2]",
         "echo `date`",
         "echo $'text'",
         "echo $\"text\"",
         "echo <(pwd)",
-        "echo \"$(date)\"",
-        "echo \"${HOME}\"",
         "echo \"`date`\"",
-        "echo $\\\n(date)",
         "echo $\\\n'ansi'",
-        "echo \"$\\\n{HOME}\"",
     ] {
         let error = parse_simple_command(input).unwrap_err();
         assert!(
-            matches!(error.kind, ParseErrorKind::UnsupportedSyntax(_)),
+            matches!(
+                error.kind,
+                ParseErrorKind::UnsupportedSyntax(_) | ParseErrorKind::MultipleCommands
+            ),
             "{input:?}: {error}"
         );
         assert!(!error.is_incomplete());
     }
-    let error = parse_simple_command("echo $\\\n(date)").unwrap_err();
-    assert_eq!(error.span, 5..9);
     assert_eq!(words(r#"echo ';' "|" \& \$\(date\)"#)[1..3], [";", "|"]);
 }
 
@@ -405,7 +402,7 @@ fn missing_pipeline_stages_are_incomplete_but_missing_filenames_are_errors() {
         assert!(
             matches!(
                 parse_pipeline(source).unwrap_err().kind,
-                ParseErrorKind::UnsupportedSyntax(_)
+                ParseErrorKind::UnsupportedSyntax(_) | ParseErrorKind::MultipleCommands
             ),
             "{source}"
         );
@@ -473,7 +470,7 @@ fn rejects_multiple_commands_and_nul_with_source_locations() {
 }
 
 #[test]
-fn defers_assignment_prefixes_and_reserved_command_words() {
+fn simple_parser_preserves_assignments_for_the_language_evaluator() {
     for source in [
         "HOME=value echo",
         "HOME='value' echo",
@@ -486,13 +483,7 @@ fn defers_assignment_prefixes_and_reserved_command_words() {
         "[[ value",
         "time echo",
     ] {
-        assert!(
-            matches!(
-                parse_simple_command(source).unwrap_err().kind,
-                ParseErrorKind::UnsupportedSyntax(_)
-            ),
-            "{source}"
-        );
+        assert!(parse_simple_command(source).is_ok(), "{source}");
     }
     for source in [
         r#""if" arg"#,

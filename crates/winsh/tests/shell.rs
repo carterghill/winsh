@@ -311,14 +311,10 @@ fn exit_is_control_flow_with_bash_numeric_status_rules() {
 fn unsupported_syntax_and_expansion_never_execute_a_command() {
     let mut f = Fixture::new();
     for source in [
-        "pwd || something",
         "pwd <<EOF",
-        "pwd; exit",
-        "pwd $HOME",
-        "pwd \"$HOME\"",
-        "pwd *.rs",
-        "pwd {a,b}",
-        "pwd $(something)",
+        "pwd; case x in",
+        "pwd $[1+2]",
+        "pwd `something`",
     ] {
         assert_eq!(f.run(source), Outcome::Continue(2), "{source}");
     }
@@ -439,6 +435,147 @@ fn quoting_controls_tilde_and_expansion_markers() {
     );
 }
 
+#[test]
+fn scripts_preserve_stdin_arguments_encoding_and_status() {
+    let root = TempDir::new();
+    let path = root.0.join("space script.sh");
+    fs::write(&path,"\u{feff}#!/usr/bin/env winsh\r\nprintf '<%s>\\n' \"$0\" \"$@\"\r\nread -r line\r\necho \"$line\"\r\nexit 17\r\n").unwrap();
+    let output = cli(
+        &[path.to_str().unwrap(), "", "two words"],
+        b"independent stdin\n",
+    );
+    assert_eq!(output.status.code(), Some(17));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("<{}>\n<>\n<two words>\nindependent stdin\n", path.display())
+    );
+    assert!(output.stderr.is_empty());
+    fs::write(&path, "echo bad\nif true; then echo incomplete\n").unwrap();
+    let output = cli(&[path.to_str().unwrap()], b"");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        cli(&["missing-winsh-script.sh"], b"").status.code(),
+        Some(127)
+    );
+}
+
+#[test]
+fn variables_export_temporary_assignments_and_native_lookup_use_session_state() {
+    let mut f = Fixture::new();
+    let child = quote(helper());
+    let name = "WINSH_SCRIPT_VARIABLE";
+    assert_eq!(
+        f.run(&format!("{name}='two words'; {child} env-optional {name}"))
+            .status(),
+        0
+    );
+    assert_eq!(f.out(), "");
+    assert_eq!(
+        f.run(&format!("export {name}; {child} env {name}"))
+            .status(),
+        0
+    );
+    assert_eq!(f.out(), "two words");
+    assert_eq!(
+        f.run(&format!(
+            "{name}=temporary {child} env {name}; printf '<%s>' \"${name}\""
+        ))
+        .status(),
+        0
+    );
+    assert_eq!(f.out(), "two wordstemporary<two words>");
+    assert_eq!(f.run(&format!("unset {name}; {name}=first {name}+=second {child} env {name}; printf '<%s>' \"${{{name}:-gone}}\"")).status(),0);
+    assert_eq!(f.out(), "two wordstemporary<two words>firstsecond<gone>");
+    fs::copy(helper(), f.root.0.join("script-helper.exe")).unwrap();
+    assert_eq!(f.run("PATH=.; script-helper status 19").status(), 19);
+    assert!(f.err().is_empty());
+}
+
+#[test]
+fn globbing_and_redirect_expansions_respect_quotes_and_working_directory() {
+    let mut f = Fixture::new();
+    for path in ["a.txt", "b.txt", "c.rs", ".hidden.txt", "bracket[1].txt"] {
+        fs::write(f.root.0.join(path), "").unwrap();
+    }
+    assert_eq!(
+        f.run("printf '<%s>\\n' [ab].txt '*.txt' no-match*.x")
+            .status(),
+        0
+    );
+    assert_eq!(f.out(), "<a.txt>\n<b.txt>\n<*.txt>\n<no-match*.x>\n");
+    assert_eq!(f.run("name='space file'; echo data >\"$name\"").status(), 0);
+    assert_eq!(fs::read(f.root.0.join("space file")).unwrap(), b"data\n");
+    assert_eq!(f.run("echo bad >$name").status(), 2);
+    assert_eq!(f.run("echo bad >[ab].txt").status(), 2);
+    assert_eq!(fs::read(f.root.0.join("a.txt")).unwrap(), b"");
+}
+
+#[test]
+fn sourcing_shares_state_and_restores_function_arguments_and_locals() {
+    let mut f = Fixture::new();
+    fs::write(
+        f.root.0.join("library.sh"),
+        "value=shared; echo \"source:$1:$0\"; return 6; echo bad\n",
+    )
+    .unwrap();
+    assert_eq!(f.run("set -- parent; f() { local value=local; source ./library.sh child; echo \"$?:$value:$1\"; }; value=global; f caller; echo \"$value:$1\"").status(),0);
+    assert_eq!(
+        f.out(),
+        "source:child:winsh\n6:shared:caller\nglobal:parent\n"
+    );
+}
+
+#[test]
+fn direct_scripts_are_isolated_and_can_be_pipeline_stages() {
+    let mut f = Fixture::new();
+    let path = f.root.0.join("worker.sh");
+    fs::create_dir(f.root.0.join("sub")).unwrap();
+    fs::write(&path,"#!/usr/bin/env winsh\necho \"$0|$1|${WINSH_PRIVATE:-missing}|$WINSH_PUBLIC\"; cd sub; exit 4\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert_eq!(f.run("WINSH_PRIVATE=private; export WINSH_PUBLIC=exported; ./worker.sh 'two words'; echo \"$?:$WINSH_PRIVATE\"").status(),0);
+    assert_eq!(
+        f.out(),
+        "./worker.sh|two words|missing|exported\n4:private\n"
+    );
+    assert_eq!(f.shell.cwd(), f.root.0);
+    assert_eq!(f.run("PATH=.; worker.sh child | read line").status(), 0);
+}
+
+#[test]
+fn function_redirections_are_deferred_until_the_function_is_called() {
+    let mut f = Fixture::new();
+    assert_eq!(f.run("f() { echo \"$1\"; } >deferred").status(), 0);
+    assert!(!f.root.0.join("deferred").exists());
+    assert_eq!(f.run("f value").status(), 0);
+    assert_eq!(fs::read(f.root.0.join("deferred")).unwrap(), b"value\n");
+}
+
+#[test]
+fn large_command_substitutions_and_compound_pipelines_do_not_deadlock() {
+    let child = quote(helper());
+    let output = cli_bounded(&format!(
+        "value=$({child} generate-text 1048576); echo \"${{#value}}\""
+    ));
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1048576\n");
+    let output = cli_bounded(&format!(
+        "value=$({child} generate 1048576); echo \"${{#value}}\""
+    ));
+    // The binary generator includes NUL, which a shell variable cannot contain.
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("NUL"));
+    let output = cli_bounded(&format!(
+        "{{ {child} generate 1048576; }} | {child} copy | {child} head 123"
+    ));
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 123);
+}
+
 #[cfg(windows)]
 #[test]
 fn batch_files_require_explicit_interpreter_invocation() {
@@ -451,12 +588,7 @@ fn batch_files_require_explicit_interpreter_invocation() {
 #[test]
 fn cli_command_mode_reports_usage_errors_and_preserves_status() {
     assert_eq!(cli(&["-c", "exit 42"], b"").status.code(), Some(42));
-    for args in [
-        vec!["-c"],
-        vec!["-c", "pwd", "extra"],
-        vec!["--unknown"],
-        vec!["script.sh"],
-    ] {
+    for args in [vec!["-c"], vec!["--unknown"]] {
         assert_eq!(cli(&args, b"").status.code(), Some(2));
     }
     assert_eq!(cli(&["--version"], b"").status.code(), Some(0));
@@ -685,13 +817,12 @@ fn failed_redirections_prevent_builtins_and_use_previously_redirected_stderr() {
 }
 
 #[test]
-fn unsupported_expansions_are_validated_before_pipeline_side_effects() {
+fn syntax_errors_are_validated_before_pipeline_side_effects() {
     let mut f = Fixture::new();
     for source in [
-        "pwd >created $HOME",
-        "pwd >created | pwd $HOME",
-        "pwd >$HOME",
-        "pwd >created | pwd >*.txt",
+        "pwd >created $[1+2]",
+        "pwd >created | pwd `foo`",
+        "pwd >created | case x in",
     ] {
         assert_eq!(f.run(source), Outcome::Continue(2), "{source}");
         assert!(!f.root.0.join("created").exists());

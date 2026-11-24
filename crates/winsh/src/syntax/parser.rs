@@ -28,13 +28,25 @@ pub fn parse_pipeline(source: &str) -> Result<Option<Pipeline>, ParseError> {
         });
     }
 
-    Parser { source, pos: 0 }.parse()
+    Parser {
+        source,
+        pos: 0,
+        nesting: 0,
+    }
+    .parse()
 }
 
+#[derive(Clone, Copy)]
 struct Parser<'a> {
     source: &'a str,
     pos: usize,
+    nesting: usize,
 }
+
+#[path = "language_parser.rs"]
+mod language;
+pub(crate) use language::parse_fragment;
+pub use language::{parse_script, valid_name};
 
 impl Parser<'_> {
     fn parse(mut self) -> Result<Option<Pipeline>, ParseError> {
@@ -96,12 +108,13 @@ impl Parser<'_> {
         while let Some(ch) = self.peek() {
             match ch {
                 ' ' | '\t' => self.pos += 1,
-                '\n' | '#' | '|' => break,
+                '\n' | '#' | '|' | ';' | ')' => break,
                 '<' | '>' => redirections.push(self.redirection(None, self.pos)?),
                 '&' if self.following() == Some('>') => {
                     redirections.push(self.redirection(None, self.pos)?)
                 }
-                ';' | '&' | '(' | ')' => {
+                '&' if self.following() == Some('&') => break,
+                '&' | '(' => {
                     return Err(self.error(
                         ParseErrorKind::UnsupportedSyntax("shell operator"),
                         self.pos,
@@ -152,9 +165,6 @@ impl Parser<'_> {
                 self.pos,
                 length,
             ));
-        }
-        if let Some(first) = words.first() {
-            check_command_word(first)?;
         }
         Ok(SimpleCommand {
             words,
@@ -255,6 +265,7 @@ impl Parser<'_> {
         Parser {
             source: self.source,
             pos: self.pos + 1,
+            nesting: self.nesting,
         }
         .peek()
     }
@@ -266,14 +277,7 @@ impl Parser<'_> {
         while let Some(ch) = self.peek() {
             let part_start = self.pos;
             match ch {
-                ' ' | '\t' | '\n' | '&' | '|' | '<' | '>' => break,
-                ';' | '(' | ')' => {
-                    return Err(self.error(
-                        ParseErrorKind::UnsupportedSyntax("shell operator"),
-                        self.pos,
-                        1,
-                    ));
-                }
+                ' ' | '\t' | '\n' | '&' | '|' | '<' | '>' | ';' | '(' | ')' => break,
                 '\'' => parts.push(self.single_quoted()?),
                 '"' => parts.push(self.double_quoted()?),
                 '\\' => self.escape(&mut parts, false)?,
@@ -359,9 +363,84 @@ impl Parser<'_> {
     fn dollar(&mut self, parts: &mut Vec<WordPart>, double: bool) -> Result<(), ParseError> {
         let start = self.pos;
         self.pos += 1;
+        if matches!(self.peek(), Some('(' | '{')) {
+            let open = self.peek().unwrap();
+            self.pos += 1;
+            let arithmetic = open == '(' && self.peek() == Some('(');
+            if arithmetic {
+                self.pos += 1;
+            }
+            let content = self.pos;
+            let close = if open == '(' { ')' } else { '}' };
+            let mut depth = 1;
+            let mut quote = None;
+            while let Some(ch) = self.source[self.pos..].chars().next() {
+                if ch == '\\' && quote != Some('\'') {
+                    self.pos += 1;
+                    if let Some(next) = self.source[self.pos..].chars().next() {
+                        self.pos += next.len_utf8();
+                    }
+                    continue;
+                }
+                if let Some(q) = quote {
+                    if ch == q {
+                        quote = None;
+                    }
+                } else if matches!(ch, '\'' | '"') {
+                    quote = Some(ch);
+                } else if ch == open {
+                    depth += 1;
+                    if depth > 64 {
+                        return Err(self.error(
+                            ParseErrorKind::UnsupportedSyntax("expansion nesting beyond 64 levels"),
+                            start,
+                            self.pos - start,
+                        ));
+                    }
+                } else if ch == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        let value = self.source[content..self.pos].to_owned();
+                        self.pos += 1;
+                        if arithmetic {
+                            if self.peek() != Some(')') {
+                                return Err(self.error(
+                                    ParseErrorKind::Expected("))"),
+                                    start,
+                                    self.pos - start,
+                                ));
+                            }
+                            self.pos += 1;
+                        }
+                        if open == '(' && !arithmetic {
+                            language::parse_nested(&value, self.nesting + 1).map_err(|mut e| {
+                                e.span.start += content;
+                                e.span.end += content;
+                                e
+                            })?;
+                        }
+                        parts.push(WordPart {
+                            kind: if arithmetic {
+                                WordPartKind::Arithmetic(value)
+                            } else if open == '(' {
+                                WordPartKind::CommandSubstitution(value)
+                            } else {
+                                WordPartKind::Parameter(value)
+                            },
+                            span: start..self.pos,
+                        });
+                        return Ok(());
+                    }
+                }
+                self.pos += ch.len_utf8();
+            }
+            return Err(self.error(
+                ParseErrorKind::Expected(if open == '(' { ")" } else { "}" }),
+                start,
+                self.pos - start,
+            ));
+        }
         let feature = match self.peek() {
-            Some('(') => Some("command or arithmetic substitution"),
-            Some('{') => Some("braced parameter expansion"),
             Some('[') => Some("legacy arithmetic expansion"),
             Some('\'' | '"') if !double => Some("dollar-prefixed quoting"),
             _ => None,
@@ -433,43 +512,5 @@ impl Parser<'_> {
             self.pos,
             1,
         )
-    }
-}
-
-fn check_command_word(word: &Word) -> Result<(), ParseError> {
-    const RESERVED_WORDS: &[&str] = &[
-        "!", "{", "}", "[[", "]]", "if", "then", "elif", "else", "fi", "time", "for", "in",
-        "until", "while", "do", "done", "case", "esac", "select", "function", "coproc",
-    ];
-
-    let WordPartKind::Text(first) = &word.parts[0].kind else {
-        return Ok(());
-    };
-    let feature = if word.parts.len() == 1 && RESERVED_WORDS.contains(&first.as_str()) {
-        Some("reserved word in command position")
-    } else if first.split_once('=').is_some_and(|(name, _)| {
-        let name = name.strip_suffix('+').unwrap_or(name);
-        let name = if let Some(indexed) = name.strip_suffix(']') {
-            indexed.split_once('[').map_or(name, |(name, _)| name)
-        } else {
-            name
-        };
-        let mut chars = name.chars();
-        chars
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    }) {
-        Some("assignment prefix")
-    } else {
-        None
-    };
-
-    match feature {
-        Some(feature) => Err(ParseError {
-            kind: ParseErrorKind::UnsupportedSyntax(feature),
-            span: word.span.clone(),
-        }),
-        None => Ok(()),
     }
 }

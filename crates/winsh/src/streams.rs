@@ -1,7 +1,7 @@
 use std::{
     fmt,
     fs::File,
-    io::{self, PipeReader, PipeWriter, Write},
+    io::{self, PipeReader, PipeWriter, Read, Write},
     process::{Command, Stdio},
 };
 
@@ -82,6 +82,16 @@ impl ShellIo {
 
     pub(crate) fn out(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
         self.streams[1].write(args)
+    }
+    pub(crate) fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        let mut byte = [0];
+        let count = match &mut self.streams[0] {
+            Stream::File(file) => file.read(&mut byte)?,
+            Stream::Reader(reader) => reader.read(&mut byte)?,
+            Stream::Inherited(fd) => inherited_file(*fd)?.read(&mut byte)?,
+            _ => return Err(bad_descriptor()),
+        };
+        Ok(if count == 0 { None } else { Some(byte[0]) })
     }
     pub(crate) fn err(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {
         // Closing stderr suppresses diagnostics without changing a command's

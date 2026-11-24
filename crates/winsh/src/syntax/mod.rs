@@ -1,4 +1,4 @@
-//! Parsing for simple commands, redirections, and foreground pipelines.
+//! Script grammar, words, redirections, and foreground pipelines.
 //!
 //! Words retain quote boundaries, escapes, and UTF-8 byte ranges into the input.
 //! Parsing never expands words, reads the environment, or executes commands.
@@ -7,7 +7,67 @@ use std::{fmt, ops::Range};
 
 mod parser;
 
+pub(crate) use parser::parse_fragment;
+pub use parser::parse_script;
+pub use parser::valid_name;
 pub use parser::{parse_pipeline, parse_simple_command};
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Script {
+    pub lists: Vec<AndOr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndOr {
+    pub pipelines: Vec<ScriptPipeline>,
+    pub operators: Vec<ListOperator>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListOperator {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptPipeline {
+    pub commands: Vec<Command>,
+    pub connections: Vec<PipeKind>,
+    pub negated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Command {
+    pub kind: CommandKind,
+    pub redirections: Vec<Redirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandKind {
+    Simple(SimpleCommand),
+    Group {
+        body: Script,
+        subshell: bool,
+    },
+    If {
+        branches: Vec<(Script, Script)>,
+        otherwise: Option<Script>,
+    },
+    For {
+        name: String,
+        words: Option<Vec<Word>>,
+        body: Script,
+    },
+    While {
+        condition: Script,
+        body: Script,
+        until: bool,
+    },
+    Function {
+        name: String,
+        body: Box<Command>,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pipeline {
@@ -75,12 +135,15 @@ pub struct WordPart {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WordPartKind {
     /// Unquoted text at word level; quoted text inside `DoubleQuoted`.
-    /// Expansion syntax such as `$HOME`, `~`, and `*.rs` is left untouched.
+    /// Simple references such as `$HOME`, `~`, and `*.rs` remain unevaluated.
     Text(String),
     SingleQuoted(String),
-    /// Children are text or escapes; single quotes here are ordinary text.
+    /// Children retain nested expansions and escapes; single quotes are text.
     DoubleQuoted(Vec<WordPart>),
     Escaped(char),
+    Parameter(String),
+    CommandSubstitution(String),
+    Arithmetic(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +168,8 @@ pub enum ParseErrorKind {
     MissingCommand,
     MissingRedirectionTarget,
     NullByte,
+    Expected(&'static str),
+    Unexpected(&'static str),
 }
 
 impl ParseError {
@@ -115,6 +180,7 @@ impl ParseError {
             ParseErrorKind::UnclosedQuote(_)
                 | ParseErrorKind::TrailingEscape
                 | ParseErrorKind::MissingCommand
+                | ParseErrorKind::Expected(_)
         )
     }
 }
@@ -132,6 +198,8 @@ impl fmt::Display for ParseError {
             ParseErrorKind::MissingCommand => write!(f, "expected a command after pipe"),
             ParseErrorKind::MissingRedirectionTarget => write!(f, "expected a redirection target"),
             ParseErrorKind::NullByte => write!(f, "shell input cannot contain a NUL byte"),
+            ParseErrorKind::Expected(token) => write!(f, "expected {token}"),
+            ParseErrorKind::Unexpected(token) => write!(f, "unexpected {token}"),
         }?;
         write!(f, " at bytes {}..{}", self.span.start, self.span.end)
     }

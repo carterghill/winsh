@@ -1,52 +1,50 @@
-# Command and pipeline parsing
+# Script parsing
 
-`winsh::syntax::parse_simple_command(&str)` returns
-`Result<Option<SimpleCommand>, ParseError>`. Blank or comment-only input produces
-`None`; a command contains words, and each word contains its original quoted and
-escaped pieces. This is a syntax API, not an argument-expansion or execution API.
+`winsh::syntax::parse_script(&str)` returns `Result<Script, ParseError>` and is
+the CLI/engine entry point. Parsing preserves quote context and UTF-8 byte ranges,
+performs no I/O, and never expands or executes words.
 
-`winsh::syntax::parse_pipeline(&str)` returns
-`Result<Option<Pipeline>, ParseError>` and is the CLI/engine entry point. A
-`Pipeline` holds commands and one `PipeKind` connection per adjacent pair.
-`SimpleCommand` holds words and ordered `Redirection` values; each redirection
-retains its operator, optional descriptor, target word, and complete source span.
-`parse_simple_command` accepts redirections but rejects pipelines with multiple
-stages. A command can consist entirely of redirections and have no words.
+The tree is:
 
-The implementation is a single forward scan with no intermediate token list or
-external dependencies. The parser is private; syntax types and the parsing
-function are the public library interface. It performs no I/O.
+~~~text
+Script
+  AndOr list                 separated by newline / semicolon
+    ScriptPipeline           connected by && / ||
+      Command                connected by | / |&; optional leading !
+        SimpleCommand        words and ordered redirections
+        Group                { list; } or (list)
+        If                   condition/body pairs and optional else
+        For / While          loop words/conditions and body
+        Function             name and deferred compound body
+~~~
 
-## Supported input
+The parser recognizes `if`/`elif`/`else`/`fi`, `for`/`in`/`do`/`done`,
+`while`/`until`, groups, and `name() { ...; }` in command position. Quoted words
+with reserved-word spelling remain ordinary words. The evaluator identifies
+assignment prefixes from unquoted leading `name=` text; the parser retains them
+as words. Compound commands may have trailing redirections and appear in pipelines.
 
-- One foreground pipeline, with command words separated by unquoted spaces and
-  tabs. `|` and `|&` connect stages; a newline/comment after a pipe can precede its
-  next stage. Leading/trailing blank lines and comments are allowed.
-- File and descriptor redirections: `<`, `>`, `>>`, `<>`, `>|`, `<&`, `>&`, `&>`,
-  and `&>>`. An adjacent unquoted descriptor number selects stdin/stdout/stderr.
-  Filename/descriptor operands are words with normal quoting and source spans.
-- Single quotes, double quotes, and adjacent quoted/unquoted text in one word.
-  Empty quoted arguments are retained.
-- Backslash escapes outside quotes. In double quotes, backslash escapes `$`,
-  backtick, double quote, and backslash; it stays literal before other characters.
-- Backslash followed by LF continues a line outside single quotes. It does not
-  create a word or split a word, including a variable name split over two lines.
-- `#` starts a comment at the beginning of an unquoted word. A `#` embedded in a
-  word, quoted, or escaped is ordinary text. Comments end at the next physical LF.
-- UTF-8 source, including non-ASCII filenames. All source ranges are half-open
-  byte offsets into the original input, including quote and escape syntax.
+The earlier APIs remain available:
 
-These rules follow the Bash reference sections on
-[escapes](https://www.gnu.org/s/bash/manual/html_node/Escape-Character.html),
-[single quotes](https://www.gnu.org/s/bash/manual/html_node/Single-Quotes.html),
-[double quotes](https://www.gnu.org/s/bash/manual/html_node/Double-Quotes.html), and
-[comments](https://www.gnu.org/s/bash/manual/html_node/Comments.html).
+- `parse_simple_command` returns `Result<Option<SimpleCommand>, ParseError>`.
+- `parse_pipeline` returns `Result<Option<Pipeline>, ParseError>` for one
+  pipeline of simple commands. A `Pipeline` has one `PipeKind` per connection.
 
-## Preserved information
+These restricted inspection APIs return `None` for blank/comment-only input and
+reject multiple commands. Use `parse_script` for contextual reserved-word grammar
+and compound commands. They are syntax APIs, not execution APIs or general Bash
+validators. A command can consist entirely of redirections.
+
+## Words and source ranges
+
+Words support single quotes, double quotes, adjacent quoted/unquoted text, empty
+quotes, and Bash backslash escaping. Backslash-LF continues a line outside single
+quotes, including within operators, keywords, and parameter names. `#` begins a
+comment only at the beginning of an unquoted word; comments end at physical LF.
 
 For `echo pre"$HOME\$USER"' literal'`, the second word contains:
 
-```text
+~~~text
 Text("pre")
 DoubleQuoted([
     Text("$HOME"),
@@ -54,71 +52,74 @@ DoubleQuoted([
     Text("USER"),
 ])
 SingleQuoted(" literal")
-```
+~~~
 
-The `$HOME` text is available for later expansion while the escaped dollar sign
-and single-quoted text retain their literal meaning. `~`, glob patterns, simple
-parameter references, and brace patterns are preserved without evaluation.
-Adjacent text across a removed continuation is joined, with its source range
-still covering the original continuation. Quote groups remain separate, even
-when empty. The shell's separate expansion stage constructs executable arguments
-from this structure, keeping the parser independent of shell state.
+Simple `$name` references stay in text for later expansion. `${expression}`,
+`$(commands)`, and `$((expression))` use `Parameter`, `CommandSubstitution`, and
+`Arithmetic` word parts. Command substitutions are syntax-checked recursively
+without execution. Tildes and pathname patterns also remain unevaluated.
 
-## Current limits
+Every word and part retains a half-open byte range into the original UTF-8
+source, including quotes, escapes, and removed continuations. Adjacent text
+across a continuation joins while retaining its original span. Double-quote
+groups stay structural, including empty groups.
 
-Command separators (`;`, `&&`, `||`, `&`), compound commands, command
-substitution, braced parameter expansion, arithmetic expansion, and dollar-prefixed
-quoting return explicit unsupported-syntax errors. They require more grammar and
-must not be treated as literal arguments by accident. Ordinary assignment prefixes
-and reserved words in command position are also rejected. This first subset is
-not a general Bash syntax validator; array assignments, contextual reserved-word
-rules, aliases, history expansion, and compound commands remain future work.
+Redirections retain source order, optional descriptor, operator kind, target
+word, and complete source span. Supported operators are `<`, `>`, `>>`, `<>`,
+`>|`, `<&`, `>&`, `&>`, and `&>>`, limited to descriptors 0, 1, and 2. The engine
+interprets descriptor duplication/moves/closing after expansion.
 
-Unclosed quotes, a trailing backslash, and a missing command after a pipe return an error for which
-`is_incomplete()` is true, so the interactive reader can request more input.
-Missing redirection operands return `MissingRedirectionTarget` and are not
-incomplete input. Here-documents, here-strings, process substitutions, and
-descriptors above 2 return explicit unsupported-syntax errors. Descriptor
-duplication, moving, and closing are interpreted by the engine after expansion.
-The trailing-backslash rule is a streaming-input convention: Bash may accept it
-literally at the end of a completed script. NUL bytes are rejected. The parser
-does not normalize CRLF: CR remains word content, and LF is the line separator.
-The CLI input loop normalizes CRLF to LF, including within multiline quoted
-input. The parser API and `-c` command text preserve the supplied source.
+These rules follow the Bash references for
+[quoting](https://www.gnu.org/software/bash/manual/html_node/Quoting.html),
+[lists](https://www.gnu.org/software/bash/manual/html_node/Lists.html), and
+[compound commands](https://www.gnu.org/software/bash/manual/html_node/Compound-Commands.html).
+See [the language guide](shell.md#scripts-and-language) for the exact expansion
+and execution subset.
 
-The [working shell](shell.md) evaluates literal words and leading `~`/`~/`.
-Parameter, wildcard, and brace expansion markers preserved by this parser
-currently produce explicit errors during expansion. Quoted or escaped literal
-markers remain usable.
+## Incomplete input and limits
 
-Windows paths follow the same quoting rules. Use `'C:\Program Files\winsh'` or
-`C:/Users/Carter` to preserve path characters. An unquoted `C:\temp` becomes
-`C:temp` under Bash escaping; the parser does not silently invent Windows rules.
+Unclosed quotes, trailing escapes/operators, missing closing expansion delimiters,
+and unfinished compound commands return errors with `is_incomplete() == true`.
+The input loop requests another line; complete file/command-string input reports
+status 2. Missing redirection operands are syntax errors rather than continuation
+requests. NUL bytes are rejected. Excessive compound/expansion nesting is rejected.
+
+Here-documents/strings, process substitution, background `&`, `case`, `select`,
+`[[ ... ]]`, `function` spelling, arrays, brace expansion, backticks, ANSI-C
+quoting, and descriptors above 2 are outside the current grammar. Unsupported
+features report errors where recognized; this remains a Bash subset.
+
+The parser does not normalize CRLF: CR stays in word content and LF separates
+commands. The CLI normalizes CRLF for file/stdin source and accepts a file's initial
+UTF-8 BOM. `-c` and the parser API preserve their supplied source.
+
+Windows paths use Bash quoting: `'C:\Program Files\winsh'` or `C:/Users/Carter`
+preserve path characters; unquoted `C:\temp` becomes `C:temp`.
 
 ## Tests
 
-```powershell
+~~~powershell
 cargo test --locked --offline --workspace --all-targets
-```
+~~~
 
-The suite checks literal quoting fixtures, quote/escape structure, byte ranges,
-empty words, continuations, unsupported syntax, and incomplete input. A bounded
-exhaustive corpus checks that parsing short combinations of syntax characters and
-Unicode never panics and always produces valid source ranges.
+Tests check literal quoting, quote/escape structure, byte ranges, empty words,
+continuations, nesting, unsupported/incomplete syntax, session behavior, scripts,
+and native execution. Bounded exhaustive corpora check that short combinations
+of syntax characters and Unicode do not panic and retain valid ranges.
 
-To additionally compare literal arguments with Bash (Git Bash example path):
+Optional comparisons against a local Bash installation:
 
-```powershell
+~~~powershell
 $env:WINSH_TEST_BASH = 'C:\Program Files\Git\bin\bash.exe'
 cargo test --test syntax literal_quoting_matches_bash -- --ignored --exact
 cargo test --test shell redirections_and_pipelines_match_bash -- --ignored --exact
-```
+cargo test --test language scripts_and_language_match_bash -- --ignored --exact
+~~~
 
-This test feeds only fixed fixtures to Bash and compares NUL-delimited output,
-including empty arguments. It is opt-in so ordinary development needs only Rust.
-On Windows, raw-CR fixtures stay in the Rust tests but are excluded from the Bash
-comparison because the Windows Bash port used during development discards them
-while reading source. Running the comparison on Linux includes those fixtures.
-The redirection/pipeline comparison runs fixed native-program fixtures in
-separate temporary directories and compares statuses, output streams, and file
-contents with Bash, including descriptor moves and `|&` ordering.
+These feed fixed fixtures to Bash and compare statuses, output streams, native
+arguments, and redirection files. They are opt-in; running winsh needs no Bash.
+The language comparison covers scalar/default/positional expansion, lists,
+branches, loops, functions/local state, substitutions, arithmetic, grouped
+pipelines, read, and exit behavior. On Windows the quoting comparison excludes
+raw-CR fixtures because the Bash port discards them while reading source; the
+Rust parser tests still cover them.

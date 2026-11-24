@@ -7,10 +7,10 @@ program execution, and compatible utilities such as cat and grep. The dedicated
 Windows terminal hosts the shell through ConPTY and stays separate from the
 shell engine.
 
-The working shell supports interactive input, one-pipeline execution,
-directory navigation, Bash-style quoting and escaping, home-directory expansion,
-file redirections, streaming pipelines, and foreground native programs. Full Bash
-syntax and .sh scripts are not implemented yet.
+The working shell supports interactive input, `.sh` scripts, variables and
+expansions, command lists, branches, loops, and functions, along with directory
+navigation, file redirections, streaming pipelines, and foreground native programs.
+It implements a documented subset of Bash syntax on Windows.
 
 ## Try it
 
@@ -40,6 +40,7 @@ From PowerShell, execute one command or inspect the available options:
 
 ~~~powershell
 cargo run -- -c 'pwd'
+cargo run -- examples/greet.sh Carter 'another name'
 cargo run -- --help
 cargo run -- --version
 ~~~
@@ -57,6 +58,18 @@ program.exe |& findstr.exe error
 
 See [redirections and pipelines](docs/shell.md#redirections-and-pipelines) for
 descriptor handling, exit statuses, and the supported subset.
+
+Scripts use the same engine as the prompt. For example:
+
+~~~sh
+greet() { printf 'Hello, %s!\n' "$1"; }
+for name in Carter 'another name'; do
+    greet "$name"
+done
+~~~
+
+See [scripts and language](docs/shell.md#scripts-and-language) for variables,
+arguments, control flow, functions, built-ins, and compatibility limits.
 
 To open the dedicated terminal on Windows:
 
@@ -127,7 +140,8 @@ Unicode, environment, streaming I/O, and exit statuses. Windows link tests use
 the system Windows PowerShell to create directory junctions without requiring
 administrator privileges. An optional [Bash comparison test](docs/syntax.md#tests)
 checks literal quoting fixtures against a local Bash installation. A second
-comparison checks redirection ordering and pipeline behavior. Terminal
+comparison checks redirection ordering and pipeline behavior, and a third checks
+script language fixtures. Terminal
 tests cover screen behavior, input encoding, real ConPTY I/O, resizing, and
 process-tree cleanup.
 
@@ -142,10 +156,13 @@ crates/winsh/
   src/main.rs        Shell CLI, input loop, and process exit
   src/console.rs     Console input and Windows Ctrl+C handling
   src/lib.rs         Public engine interface
-  src/syntax/        Word, redirection, and pipeline syntax and parser
+  src/syntax/        Script grammar, words, redirections, and source ranges
   src/shell.rs       Session state and command evaluation
-  src/expand.rs      Quote-aware argument construction and ~/ expansion
+  src/expand.rs      Quote-aware parameter and command expansion
+  src/arithmetic.rs  Integer arithmetic expressions
+  src/glob.rs        Pathname pattern expansion
   src/builtins.rs    cd, pwd, and exit
+  src/language_builtins.rs Script state, tests, read, echo, and printf
   src/exec.rs        Native executable lookup and foreground execution
   src/pipeline.rs    Concurrent stages and isolated pipeline built-ins
   src/redirect.rs    Ordered file and descriptor redirections

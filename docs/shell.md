@@ -1,13 +1,14 @@
 # The working shell
 
-The shell implements navigation, redirections, streaming pipelines, and native
-foreground execution. It is a
-small supported subset of Bash, with Windows paths and programs.
+The shell implements scripts, navigation, redirections, streaming pipelines,
+and native foreground execution. It is a supported subset of Bash, with Windows
+paths and programs.
 
 ## Running commands
 
 Run `cargo run` to start an interactive session, or `cargo run -- -c 'pwd'`
-from PowerShell to execute one command or pipeline. A release build produces
+from PowerShell to execute a command string. Run a script with
+`cargo run -- examples/greet.sh Carter`. A release build produces
 `target/release/winsh.exe`.
 
 The dedicated window is available with `cargo build --workspace` followed by
@@ -31,14 +32,13 @@ arguments, the second empty. Programs with custom Windows command-line parsing
 may interpret their argument text differently from programs using the usual
 Windows C runtime rules.
 
-Unclosed quotes, trailing backslashes, and a trailing `|` or `|&` request another
+Unclosed quotes, trailing operators, and unfinished compound commands request another
 input line using the `> ` prompt. On Windows, Ctrl+C cancels pending input or
 interrupts foreground pipeline programs without closing winsh. A child can
 define its own Ctrl+C behavior.
 `exit` leaves the shell; Ctrl+Z provides console end-of-input.
 
-Redirected standard input reads commands without prompts. This is a basic
-sequence of command lines, not full script support. Native children inherit
+Redirected standard input reads commands without prompts. Native children inherit
 stdin and can consume the bytes after their command line; the input reader
 deliberately avoids reading those bytes ahead.
 
@@ -89,7 +89,7 @@ the whole result in winsh. Native Windows exit codes retain all 32 bits.
 Implicit PATHEXT and file-association dispatch are not implemented. Direct
 `.bat`/`.cmd` execution is rejected; invoke `cmd.exe` explicitly when needed.
 `dir` and similar commands supplied by cmd are not native executables.
-winsh currently supplies only cd, pwd, and exit as built-ins.
+The script built-ins are described below.
 
 | Status | Meaning |
 | --- | --- |
@@ -159,37 +159,124 @@ session normally.
 
 The pipeline status is the last stage's status, including 126/127 for a failed
 last executable or 1 for a last-stage redirection failure. An earlier stage's
-failure does not override a successful final stage. Pipefail, pipeline negation
-(`!`), and asynchronous pipelines are not implemented. Earlier stages may fail
+failure does not override a successful final stage. `! pipeline` negates its
+status. Pipefail and asynchronous pipelines are not implemented. Earlier stages may fail
 with a broken pipe if a downstream command exits early; the shell still waits
 for every stage. If an engine I/O failure aborts startup or waiting, guards kill
 and reap the native stages already started.
 
 A newline after a pipe may be followed by comments and then another command.
 A missing redirection operand is a syntax error, not a request for another input
-line. The entire pipeline's supported expansions are validated before files are
-opened or programs are started, so unsupported expansion syntax cannot cause
-partial execution.
+line. A complete script is parsed before execution. Expansions occur when each
+command is reached, so skipped branches and short-circuited lists have no
+expansion side effects. Expansion failures stop the current script evaluation
+with status 2; the interactive session can accept another command. Earlier
+commands or pipeline stages may already have run.
 
 These rules follow the Bash references for [redirections](https://www.gnu.org/software/bash/manual/html_node/Redirections.html)
 and [pipelines](https://www.gnu.org/software/bash/manual/html_node/Pipelines.html).
 
+## Scripts and language
+
+From PowerShell:
+
+~~~powershell
+cargo run -- examples/greet.sh Carter 'another name'
+cargo run -- -c 'printf "%s\n" "$0" "$@"' command-name first second
+~~~
+
+`winsh [--] script [arguments...]` reads a UTF-8 file, accepts an initial BOM,
+and normalizes CRLF to LF. A shebang line is a comment; it does not select another
+interpreter. `$0` is the supplied filename and `$1` onward are its arguments.
+The file is read independently of stdin, so `read` and native children can read
+the caller's input. File input and `-c` are parsed completely before execution;
+stdin input is parsed one complete command list or compound command at a time.
+For `-c source [name [arguments...]]`, name supplies `$0`, defaulting to `winsh`.
+
+Inside winsh, `./script.sh arguments...` and named `.sh` files on PATH run in
+an isolated shell initialized from exported environment variables. Their exit,
+directory changes, variables, and functions do not modify the caller. Source
+files explicitly with `. ./library.sh [arguments...]` or `source ./library.sh`
+to share session state. Source filenames resolve against cwd; source does not
+search PATH. Supplied source arguments temporarily replace positional arguments;
+without arguments it shares the caller's arguments. `return` ends a sourced file.
+
+~~~sh
+greet() {
+    local name=${1:-world}
+    printf 'Hello, %s!\n' "$name"
+}
+for name in "$@"; do
+    greet "$name"
+done
+~~~
+
+| Feature | Supported forms |
+| --- | --- |
+| Scalar assignments | `name=value`, `name+=value`, assignment-only commands, and temporary `name=value command` prefixes. Values avoid splitting/globbing. |
+| Exported environment | Inherited environment entries are exported; `export name[=value]` exports a scalar, and `unset name` removes it. Unexported variables stay in the shell. |
+| Parameters | `$name`, `${name}`, `$0`…`$9`, `${10}` onward, `$?`, `$#`, `$$`, `$@`, and `$*`. |
+| Parameter operators | `${name-word}`, `${name:-word}`, `+`, `:+`, `=`, `:=`, `?`, `:?`, and `${#name}`. Default words expand lazily. Quote the entire expansion when preserving spaces. |
+| Command substitution | `$(commands)` runs in an isolated session, captures UTF-8 stdout, and removes trailing LF bytes. Stderr stays on the current stderr. An assignment-only command returns the last substitution's status. |
+| Integer expansion | `$((expression))` with decimal/octal/hex integers, integer-valued scalar names, parentheses, unary `+ - ! ~`, arithmetic `+ - * / %`, shifts, comparisons, bitwise operators, and short-circuit `&&` / `||`. Arithmetic wraps at 64 bits; division errors return 2. |
+| Field splitting | Unquoted parameter/substitution results split using IFS (default space/tab/LF); quoted results preserve empty arguments and spaces. `"$@"` preserves separate positional arguments. |
+| Pathname patterns | Unquoted `*`, `?`, and bracket/range/negated classes. Matches are sorted, exclude leading-dot names unless explicitly requested, and leave unmatched patterns literal. Use slash path separators. |
+| Lists | Newlines, `;`, `&&`, `||`, and pipeline negation `!`. AND/OR lists evaluate left to right and skip expansions in commands they skip. |
+| Branches | `if commands; then commands; elif commands; then commands; else commands; fi`. |
+| Loops | `for name in words; do commands; done`, `for name; do commands; done` over positional arguments, and `while` / `until commands; do commands; done`. |
+| Loop control | `break [positive-count]`, `continue [positive-count]`; counts can unwind nested loops. |
+| Groups | `{ commands; }` shares state; `(commands)` isolates state. Groups and compound commands can have redirections or be pipeline stages. |
+| Functions | `name() { commands; }`, arguments, recursion, `local name[=value]`, and `return [status]`. Functions share session state, with temporary arguments and dynamically scoped local variables. |
+
+Pipeline functions and compound commands use isolated session copies, like
+pipeline built-ins. Function definitions take effect when evaluated; their
+redirects apply when called. Parsing/recursion limits reject excessive nesting
+instead of allowing unbounded recursive evaluation.
+
+| Additional built-in | Supported behavior |
+| --- | --- |
+| `:` / `true` / `false` | Return success, success, or failure. |
+| `echo [-n] [words...]` | Join words with spaces; `-n` suppresses the newline. Use printf for escapes. |
+| `printf format [values...]` | Repeating format with `%s`, `%b`, `%d`, `%i`, `%u`, `%x`, `%X`, `%o`, `%%`; basic backslash escapes including `\n`, `\t`, and `\\`. Width/precision and other formats are unsupported. |
+| `test` / `[` | Empty/nonempty strings; `-n`, `-z`, `-e`, `-f`, `-d`, `-s`; string `=`, `==`, `!=`, `<`, `>`; integer `-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`; leading `!`. `[` requires `]`. Combine tests with shell `&&` / `||`. Quote `<` and `>`. |
+| `read [-r] [names...]` | Read one UTF-8 LF-terminated line without reading ahead. With no names, set REPLY; otherwise split using IFS, with the final name receiving remaining fields. `-r` preserves backslashes. EOF returns 1, including a final partial line. |
+| `set -- [arguments...]` | Replace positional arguments. |
+| `shift [count]` | Drop positional arguments; default one. |
+| `unset [-v|-f] names...` | Remove variables or functions. |
+
+Command substitutions collect their text result while concurrently draining the
+pipe, so output larger than a pipe buffer does not deadlock. Unlike binary
+pipelines, substitution output must be valid UTF-8 without NUL bytes; invalid
+text is an expansion error. Bash may instead retain arbitrary bytes or discard
+NUL bytes. Script source and read input are also UTF-8.
+
+The comparison fixtures use the [Bash reference manual](https://www.gnu.org/software/bash/manual/bash.html)
+and a locally installed Bash as the behavioral reference, with no Bash runtime
+dependency. Windows exported names are case-insensitive, while unexported scalar
+names are case-sensitive. Native exit codes retain 32 bits. Filename matches use
+case-sensitive pattern comparisons and Rust string ordering, rather than Bash
+locale collation. These differences can affect cross-platform scripts.
+
 ## Current limits
 
-Command lists, assignments, variables, substitutions,
-wildcards, brace expansion, functions, and control flow are not implemented.
-Unsupported constructs produce errors before execution. Detection is deliberately
-conservative: unquoted `*`, `?`, `[`, `{`, and `}` are rejected even in some
-strings Bash would leave literal. Quote or escape these characters when intended
-as ordinary arguments.
+This is not a full Bash implementation. Arrays, associative arrays, `case`,
+`select`, `[[ ... ]]`, arithmetic commands/for loops, arithmetic assignment,
+increment/decrement, exponentiation, ternary/comma operators, recursive variable
+expressions in arithmetic, pattern-removal/replacement/substring parameter
+operators, indirect expansion, brace expansion, ANSI-C quoting, and backticks
+remain pending. The `function name` spelling is unsupported; use `name() { ...; }`.
+Advanced quoting within parameter default words, combined whitespace/nonwhitespace
+IFS edge cases, and escaped IFS characters in non-raw read are not fully Bash-compatible.
+`return` accepts a nonnegative status; shell options (`set -e`, `-u`, pipefail,
+shopt), readonly variables, aliases, traps, and POSIX special-built-in error rules
+are not implemented. Unsupported built-in flags/forms report errors.
 
 Here-documents (`<<`, `<<-`), here-strings (`<<<`), process substitution, named
-descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. Here-documents
-and here-strings are deferred with scripting and expansion work. There is no
+descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is no
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.
 
-There is no script-file argument, shebang dispatch, CDPATH lookup, history,
+There is no arbitrary shebang dispatch, CDPATH lookup, history,
 completion, configurable prompt, background jobs, or winsh implementation of
 cat/grep/ls yet. Windows Ctrl+C support covers foreground execution; Unix signal
 and job-control integration is deferred.
@@ -200,7 +287,7 @@ For `cd 'C:\Program Files'`:
 
 1. `main.rs` reads source and asks `syntax` to parse it. The parser returns words
    that still distinguish unquoted, quoted, and escaped pieces.
-2. `Shell::execute_pipeline` calls `expand`. Quote-aware construction produces two
+2. `Shell::execute_script` evaluates lists and calls `expand`. Quote-aware construction produces two
    `OsString` values: the command name and one complete path argument.
 3. `builtins` recognizes cd. It validates and resolves the path through
    `platform`, then updates the session's directory and environment.
@@ -213,15 +300,18 @@ wait. Neither path sends the source text through PowerShell or cmd.
 
 The public engine interface consists of:
 
-- `Shell` owns one session's cwd, environment, and last status.
+- `Shell` owns one session's cwd, variables, exported environment, arguments,
+  functions, and last status.
 - `ShellIo` owns stdin/stdout/stderr as inherited streams, files, pipe ends, or
   closed streams. `with_stdin`/`with_stdout`/`with_stderr` still accept File handles
   for embedding. The same stream model serves built-ins and children.
 - `Outcome` distinguishes `Continue(status)` from `Exit(status)`. Only the CLI
   calls `std::process::exit`, so executing exit cannot terminate a library host.
 
-`Shell::run` parses a pipeline, `execute_pipeline` evaluates an already parsed
-pipeline, and `execute` remains available for one `SimpleCommand`. `Shell::clone`
+`Shell::run` parses a script, `execute_script` evaluates an already parsed script,
+`execute_pipeline` accepts the earlier simple-pipeline AST, and `execute` remains
+available for one `SimpleCommand`. `set_arguments` supplies `$0` and positional
+arguments to embedded sessions. `Shell::clone`
 copies session state for isolated evaluation; it does not change host process
 state or share mutable session variables.
 

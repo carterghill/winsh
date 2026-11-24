@@ -32,13 +32,14 @@ on the engine and launches the shell executable as a separate process.
 
 | Module | Responsibility |
 | --- | --- |
-| `syntax` | Words, redirections, pipelines, and source locations. No filesystem or process access. |
-| `expand` | Quote-aware argument construction: currently literals and home-directory expansion. |
-| `shell` | Working directory, inherited environment, last status, and evaluation. |
+| `syntax` | Script grammar, words, redirections, pipelines, and source locations. No I/O. |
+| `expand` | Quote-aware parameters, substitutions, field splitting, and argument construction. |
+| `arithmetic` / `glob` | Integer expressions and pathname patterns. |
+| `shell` | Directory, variables, environment, arguments, functions, status, and evaluation. |
 | `exec` | Executable lookup and foreground child lifecycle. |
 | `pipeline` | Starting concurrent stages, isolated built-ins, and waiting for every stage. |
 | `redirect` | Opening files and applying descriptor changes in source order. |
-| `builtins` | Commands that need session state: cd, pwd, and exit. |
+| `builtins` / `language_builtins` | Navigation, script state/control, tests, and basic text I/O. |
 | `platform` | Native paths, exit statuses, and process launch details. |
 | `streams` | Explicit standard I/O handles shared by built-ins and children. |
 | `console` | Executable-only console input and Windows Ctrl+C handling. |
@@ -46,8 +47,9 @@ on the engine and launches the shell executable as a separate process.
 The command flow is:
 
 ~~~text
-CLI input (interactive, -c, or eventually a script)
-    -> syntax: parse a pipeline, words, and ordered redirections
+CLI input (interactive, -c, or a script file)
+    -> syntax: parse a script with lists, compound commands, and pipelines
+    -> shell: evaluate lists, branches, loops, and functions
     -> expand: construct arguments and redirection targets using session state
     -> streams: connect pipes and apply each stage's redirections
     -> builtins: operate on the session
@@ -55,10 +57,11 @@ CLI input (interactive, -c, or eventually a script)
     -> Outcome: continue or exit, with a status
 ~~~
 
-Interactive input and `-c` share this flow; script input will use it too.
+Interactive input, `-c`, and script files share this flow.
 See [the shell walkthrough](shell.md#following-a-command-through-the-code).
 
-`Shell` owns cwd, environment, and last status. `ShellIo` supplies explicit I/O
+`Shell` owns cwd, variables, exported environment, positional arguments,
+functions, and last status. `ShellIo` supplies explicit I/O
 handles to built-ins and children. `Outcome` distinguishes a command's exit
 status from a request to leave the session. Only the executable exits the host
 process; the library returns results.
@@ -138,9 +141,12 @@ no shell framework, async runtime, or GUI toolkit dependency.
    pipelines. Native stages start before waiting, pipeline built-ins use cloned
    sessions, unused pipe ends close promptly, and child guards kill/reap on host
    failures. See [the supported subset](shell.md#redirections-and-pipelines).
-5. Add script-file input and language features incrementally: variables,
-   expansions, command lists, control flow, and functions. Compare each feature
-   against Bash and record intentional Windows differences.
+5. **Implemented subset:** script-file input, scalar variables and positional
+   parameters, quote-aware expansion, substitutions, pathname patterns, command
+   lists, if/for/while/until, groups, and functions. Built-ins support export,
+   local variables, source, tests, read, echo, and printf. Fixed fixtures compare
+   each language category against Bash. See [the language guide](shell.md#scripts-and-language)
+   for exact forms, Windows differences, and advanced Bash features still pending.
 6. Add compatible utilities such as cat and grep as scripts require them, with
    documented supported options and failure behavior.
 7. Improve editing, history, completion, and job control as separate shell

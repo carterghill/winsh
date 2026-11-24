@@ -217,6 +217,17 @@ fn winsh_interactive_smoke() {
     wait_for_prompt_count(&harness, prompts + 1);
     harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-pipeline-" + "interrupt")'"#);
     harness.wait_for("after-pipeline-interrupt");
+    for line in [
+        "check() {",
+        "for label in language; do",
+        r#"printf '%s-%s\n' "$label" "$1""#,
+        "done",
+        "}",
+        "check passed",
+    ] {
+        harness.enter(line);
+    }
+    harness.wait_for("language-passed");
     harness.enter("exit 42");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

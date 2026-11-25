@@ -52,6 +52,8 @@ impl Drop for Symbols {
 
 pub(super) struct Fonts {
     text: Vec<Font>,
+    label: Font,
+    icon: Font,
     compact_symbol: SymbolSize,
     spaced_symbol: SymbolSize,
     pub(super) width: i32,
@@ -92,6 +94,8 @@ impl Fonts {
         // the larger face to draw beyond a single text cell.
         Ok(Self {
             text,
+            label: create_font((13 * dpi as i32 + 48) / 96, 0, w!("Segoe UI"))?,
+            icon: create_font((12 * dpi as i32 + 48) / 96, 0, w!("Segoe MDL2 Assets"))?,
             compact_symbol: SymbolSize::new(em.min(width), height, text_center)?,
             spaced_symbol: SymbolSize::new(em.min(width + width / 2), height, text_center)?,
             width,
@@ -102,6 +106,14 @@ impl Fonts {
 
     pub(super) fn text(&self, style: usize) -> HFONT {
         self.text[style].0
+    }
+
+    pub(super) fn label(&self) -> HFONT {
+        self.label.0
+    }
+
+    pub(super) fn icon(&self) -> HFONT {
+        self.icon.0
     }
 
     pub(super) fn symbol(&self, spaced: bool) -> &SymbolSize {

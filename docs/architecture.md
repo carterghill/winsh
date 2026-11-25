@@ -102,8 +102,9 @@ Display        <- terminal <- ConPTY <- shell and child output
 The terminal interprets output into a cell grid, including cursor movement,
 colors, and alternate screens. `windows-sys` supplies the native Win32 window,
 GDI text renderer, and ConPTY APIs; `vt100` supplies parsing and screen state.
-The first milestone provides one window, one session, keyboard and clipboard
-input, resizing, scrollback, and shutdown. See [the terminal guide](terminal.md).
+Each title-bar tab owns a ConPTY session, screen, and scrollback. The window
+routes keyboard and clipboard input to the active tab and resizes every
+session when the window changes size. See [the terminal guide](terminal.md).
 
 Input writes, output reads, and ConPTY control run on separate workers. Output
 is parsed directly into bounded screen/scrollback state rather than queued as

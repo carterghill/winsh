@@ -4,7 +4,7 @@ use std::{
     ffi::{OsStr, OsString},
     io,
     os::windows::ffi::OsStrExt,
-    path::Path,
+    path::{Path, PathBuf},
     ptr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -12,7 +12,7 @@ use std::{
 
 use windows_sys::{
     Win32::{
-        Foundation::{GlobalFree, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::*,
         System::{
             DataExchange::{
@@ -22,9 +22,10 @@ use windows_sys::{
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::{
+            Controls::WM_MOUSELEAVE,
             HiDpi::{
-                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem,
-                SetProcessDpiAwarenessContext,
+                AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                GetDpiForSystem, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
             },
             Input::KeyboardAndMouse::*,
             WindowsAndMessaging::*,
@@ -40,7 +41,9 @@ use crate::{
 };
 
 mod fonts;
+mod titlebar;
 use fonts::{Fonts, Symbols};
+use titlebar::{Control, Layout, px};
 
 const PADDING: i32 = 12;
 const CF_UNICODETEXT: u32 = 13;
@@ -54,26 +57,11 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
     // SAFETY: GetDpiForSystem has no preconditions.
     let dpi = unsafe { GetDpiForSystem() }.max(96);
-    let terminal = Arc::new(Mutex::new(Terminal::new(30, 100)));
-    let symbols = Symbols::load()?;
-    let mut state = Box::new(State {
-        terminal: Arc::clone(&terminal),
-        session: None,
-        fonts: Fonts::new(dpi)?,
-        symbols,
-        text: TextInput::default(),
-        focused: false,
-        cursor_visible: true,
-        cursor_tick: Instant::now(),
-        size: (30, 100),
-        wheel: 0,
-        error: None,
-        status: 0,
-    });
+    let mut state = Box::new(State::new(program, arguments, dpi)?);
     // SAFETY: static system cursor, borrowed for the window class lifetime.
     let cursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_IBEAM) };
     let class = WNDCLASSW {
-        style: CS_HREDRAW | CS_VREDRAW,
+        style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
         lpfnWndProc: Some(window_proc),
         hInstance: instance,
         hCursor: cursor,
@@ -87,11 +75,11 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     let mut rectangle = RECT {
         left: 0,
         top: 0,
-        right: 100 * state.fonts.width + 2 * PADDING,
-        bottom: 30 * state.fonts.height + 2 * PADDING,
+        right: 100 * state.fonts.width + 2 * px(dpi, PADDING),
+        bottom: 30 * state.fonts.height + 2 * px(dpi, PADDING) + state.layout.height,
     };
     // SAFETY: initialized rectangle and the style used for CreateWindowExW.
-    unsafe { AdjustWindowRectEx(&mut rectangle, WS_OVERLAPPEDWINDOW, 0, 0) };
+    unsafe { AdjustWindowRectExForDpi(&mut rectangle, WS_OVERLAPPEDWINDOW, 0, 0, dpi) };
     // SAFETY: state is boxed and stays alive through the entire message loop.
     // WM_NCCREATE borrows its pointer; WM_NCDESTROY clears the window's copy.
     let hwnd = unsafe {
@@ -103,7 +91,7 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             rectangle.right - rectangle.left,
-            rectangle.bottom - rectangle.top,
+            rectangle.bottom, // The custom title bar occupies the client area.
             ptr::null_mut(),
             ptr::null_mut(),
             instance,
@@ -112,15 +100,6 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     };
     if hwnd.is_null() {
         return Err(io::Error::last_os_error());
-    }
-    let session = Session::spawn(program, arguments, state.size.0, state.size.1, terminal);
-    match session {
-        Ok(session) => state.session = Some(session),
-        Err(error) => {
-            // SAFETY: the window was created on this thread and is still live.
-            unsafe { DestroyWindow(hwnd) };
-            return Err(error);
-        }
     }
     // SAFETY: a live window; timer messages run only on this same thread.
     unsafe {
@@ -148,12 +127,16 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
         }
         // SAFETY: a message obtained from GetMessageW.
         unsafe {
-            TranslateMessage(&message);
+            // A tab shortcut belongs entirely to the window. Translating it
+            // would queue a control character for the newly selected shell.
+            if !(message.message == WM_KEYDOWN
+                && tab_shortcut(message.wParam as u16, modifiers()).is_some())
+            {
+                TranslateMessage(&message);
+            }
             DispatchMessageW(&message);
         }
     }
-    // Join the session before reporting an error or returning to the caller.
-    drop(state.session.take());
     if let Some(error) = state.error.take() {
         return Err(io::Error::other(error));
     }
@@ -161,11 +144,15 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
 }
 
 pub fn message(text: &str, error: bool) {
+    window_message(ptr::null_mut(), text, error);
+}
+
+fn window_message(hwnd: HWND, text: &str, error: bool) {
     let text = wide(text);
     // SAFETY: both strings are terminated and live through this synchronous call.
     unsafe {
         MessageBoxW(
-            ptr::null_mut(),
+            hwnd,
             text.as_ptr(),
             w!("winsh terminal"),
             MB_OK
@@ -178,34 +165,157 @@ pub fn message(text: &str, error: bool) {
     };
 }
 
-struct State {
+struct Tab {
     terminal: Arc<Mutex<Terminal>>,
-    session: Option<Session>,
+    session: Session,
+    title: String,
+    default_title: String,
+    text: TextInput,
+    wheel: i32,
+}
+
+impl Tab {
+    fn spawn(
+        program: &Path,
+        arguments: &[OsString],
+        (rows, columns): (u16, u16),
+        number: usize,
+    ) -> io::Result<Self> {
+        let terminal = Arc::new(Mutex::new(Terminal::new(rows, columns)));
+        let session = Session::spawn(program, arguments, rows, columns, Arc::clone(&terminal))?;
+        let shell = program
+            .file_stem()
+            .unwrap_or(program.as_os_str())
+            .to_string_lossy();
+        let default_title = if number == 1 {
+            shell.into_owned()
+        } else {
+            format!("{shell} {number}")
+        };
+        Ok(Self {
+            terminal,
+            session,
+            title: default_title.clone(),
+            default_title,
+            text: TextInput::default(),
+            wheel: 0,
+        })
+    }
+}
+
+struct State {
+    tabs: Vec<Tab>,
+    active: usize,
+    next_number: usize,
+    program: PathBuf,
+    arguments: Vec<OsString>,
+    layout: Layout,
+    dpi: u32,
+    hover: Option<Control>,
+    pressed: Option<Control>,
+    title_dirty: bool,
     fonts: Fonts,
     symbols: Symbols,
-    text: TextInput,
     focused: bool,
     cursor_visible: bool,
     cursor_tick: Instant,
     size: (u16, u16),
-    wheel: i32,
     error: Option<String>,
     status: i32,
 }
 
 impl State {
+    fn new(program: &Path, arguments: &[OsString], dpi: u32) -> io::Result<Self> {
+        let symbols = Symbols::load()?;
+        let size = (30, 100);
+        Ok(Self {
+            tabs: vec![Tab::spawn(program, arguments, size, 1)?],
+            active: 0,
+            next_number: 2,
+            program: program.to_owned(),
+            arguments: arguments.to_owned(),
+            layout: Layout::new(dpi, 0, 1, 0, 0),
+            dpi,
+            hover: None,
+            pressed: None,
+            title_dirty: true,
+            fonts: Fonts::new(dpi)?,
+            symbols,
+            focused: false,
+            cursor_visible: true,
+            cursor_tick: Instant::now(),
+            size,
+            error: None,
+            status: 0,
+        })
+    }
+
+    fn current(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    fn current_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    fn relayout(&mut self, width: i32) {
+        self.layout = Layout::new(
+            self.dpi,
+            width,
+            self.tabs.len(),
+            self.active,
+            self.layout.first,
+        );
+        self.hover = None;
+        self.pressed = None;
+    }
+
+    fn select(&mut self, index: usize) {
+        self.active = index;
+        self.title_dirty = true;
+        self.cursor_visible = true;
+        self.cursor_tick = Instant::now();
+        self.relayout(self.layout.width);
+    }
+
+    fn close(&mut self, index: usize) {
+        self.tabs.remove(index);
+        if !self.tabs.is_empty() {
+            let active = self.active - usize::from(index < self.active);
+            self.select(active.min(self.tabs.len() - 1));
+        }
+    }
+
+    fn activate(&mut self, control: Control) -> io::Result<()> {
+        match control {
+            Control::Tab(index) => self.select(index),
+            Control::CloseTab(index) => self.close(index),
+            Control::New => {
+                let tab = Tab::spawn(&self.program, &self.arguments, self.size, self.next_number)?;
+                self.next_number += 1;
+                self.tabs.push(tab);
+                self.select(self.tabs.len() - 1);
+            }
+            Control::Previous if self.layout.first > 0 => self.select(self.layout.first - 1),
+            Control::Next if self.layout.end < self.tabs.len() => self.select(self.layout.end),
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn resize(&mut self, width: i32, height: i32) {
         if width <= 0 || height <= 0 {
             return;
         } // A minimized window has no grid.
-        let columns = ((width - 2 * PADDING) / self.fonts.width).clamp(1, 1000) as u16;
-        let rows = ((height - 2 * PADDING) / self.fonts.height).clamp(1, 500) as u16;
+        self.relayout(width);
+        let padding = px(self.dpi, PADDING);
+        let columns = ((width - 2 * padding) / self.fonts.width).clamp(1, 1000) as u16;
+        let rows =
+            ((height - self.layout.height - 2 * padding) / self.fonts.height).clamp(1, 500) as u16;
         if self.size != (rows, columns) {
             self.size = (rows, columns);
-            if let Some(session) = &self.session {
-                session.resize(rows, columns);
-            } else {
-                self.terminal.lock().unwrap().resize(rows, columns);
+            for tab in &self.tabs {
+                tab.session.resize(rows, columns);
             }
         }
     }
@@ -214,14 +324,12 @@ impl State {
         if bytes.is_empty() {
             return;
         }
-        self.terminal.lock().unwrap().follow_output();
+        let tab = &self.tabs[self.active];
+        tab.terminal.lock().unwrap().follow_output();
         self.cursor_visible = true;
         self.cursor_tick = Instant::now();
-        if let Some(session) = &self.session {
-            // Exit may race the final key event; the session's exit event owns
-            // shutdown and its status, including when the input pipe closes.
-            let _ = session.write(bytes);
-        }
+        // The exit event owns shutdown if the input pipe closes first.
+        let _ = tab.session.write(bytes);
     }
 
     fn key_down(&mut self, code: u16, modifiers: Modifiers, hwnd: HWND) -> bool {
@@ -229,19 +337,26 @@ impl State {
             || (modifiers.shift && code == VK_INSERT)
         {
             if let Some(text) = clipboard_text(hwnd) {
-                let bracketed = self.terminal.lock().unwrap().screen().bracketed_paste();
+                let bracketed = self
+                    .current()
+                    .terminal
+                    .lock()
+                    .unwrap()
+                    .screen()
+                    .bracketed_paste();
                 self.send(input::paste(&text, bracketed));
             }
             return true;
         }
         if modifiers.control && modifiers.shift && code == b'C' as u16 {
-            let text = self.terminal.lock().unwrap().screen().contents();
+            let text = self.current().terminal.lock().unwrap().screen().contents();
             copy_text(hwnd, &text);
             return true;
         }
         if modifiers.shift && matches!(code, VK_PRIOR | VK_NEXT) {
             let lines = i32::from(self.size.0).saturating_sub(1);
-            self.terminal
+            self.current()
+                .terminal
                 .lock()
                 .unwrap()
                 .scroll(if code == VK_PRIOR { lines } else { -lines });
@@ -262,53 +377,68 @@ impl State {
             VK_F1..=VK_F12 => Key::Function((code - VK_F1 + 1) as u8),
             _ => return false,
         };
-        let application = self.terminal.lock().unwrap().screen().application_cursor();
+        let application = self
+            .current()
+            .terminal
+            .lock()
+            .unwrap()
+            .screen()
+            .application_cursor();
         self.send(input::key(key, modifiers, application));
         true
     }
 
-    fn tick(&mut self, hwnd: HWND) -> bool {
-        if let Some(session) = &self.session {
-            while let Some(event) = session.try_event() {
+    fn tick(&mut self) -> bool {
+        let mut redraw = false;
+        for index in (0..self.tabs.len()).rev() {
+            let tab = &mut self.tabs[index];
+            let mut exit = None;
+            while let Some(event) = tab.session.try_event() {
                 match event {
                     Event::Resized(_, _) => {}
                     Event::Exited(status) => {
-                        self.status = status;
-                        return true;
+                        exit = Some(status);
+                        break;
                     }
                     Event::Error(error) => {
-                        self.error = Some(error);
-                        self.status = 1;
-                        return true;
+                        self.error = Some(format!("{}: {error}", tab.title));
+                        exit = Some(1);
+                        break;
                     }
                 }
             }
+            if let Some(status) = exit {
+                self.close(index);
+                if self.tabs.is_empty() {
+                    self.status = status;
+                }
+                redraw = true;
+                continue;
+            }
+            let mut terminal = tab.terminal.lock().unwrap();
+            if index == self.active {
+                redraw |= terminal.take_dirty();
+            }
+            if let Some(title) = terminal.take_title() {
+                let title =
+                    if title.is_empty() || self.program.file_stem() == Some(OsStr::new(&title)) {
+                        tab.default_title.clone()
+                    } else {
+                        title
+                    };
+                if tab.title != title {
+                    tab.title = title;
+                    self.title_dirty |= index == self.active;
+                    redraw = true;
+                }
+            }
         }
-        let mut terminal = self.terminal.lock().unwrap();
-        let mut redraw = terminal.take_dirty();
-        let title = terminal.take_title();
-        drop(terminal);
-        if self.cursor_tick.elapsed() >= Duration::from_millis(500) {
+        if self.focused && self.cursor_tick.elapsed() >= Duration::from_millis(500) {
             self.cursor_tick = Instant::now();
             self.cursor_visible = !self.cursor_visible;
             redraw = true;
         }
-        // SAFETY: the caller dispatches a timer for this live window. Neither
-        // call reenters a state-borrowing message handler.
-        unsafe {
-            if let Some(title) = title {
-                let title = wide(&if title.is_empty() || title == "winsh" {
-                    "winsh".to_owned()
-                } else {
-                    format!("{title} — winsh")
-                });
-                SetWindowTextW(hwnd, title.as_ptr());
-            }
-            if redraw {
-                InvalidateRect(hwnd, ptr::null(), 0);
-            }
-        }
-        false
+        redraw
     }
 
     fn paint(&self, hwnd: HWND) {
@@ -340,7 +470,37 @@ impl State {
             FillRect(memory, &client, background);
             DeleteObject(background);
 
-            let terminal = self.terminal.lock().unwrap();
+            if !self.tabs.is_empty() {
+                self.layout.paint(memory, self, IsZoomed(hwnd) != 0);
+                if paint.rcPaint.bottom > self.layout.height {
+                    self.paint_terminal(memory);
+                }
+            }
+            BitBlt(
+                target,
+                0,
+                0,
+                client.right,
+                client.bottom,
+                memory,
+                0,
+                0,
+                SRCCOPY,
+            );
+            SelectObject(memory, previous_font);
+            SelectObject(memory, previous_bitmap);
+            DeleteObject(bitmap);
+            DeleteDC(memory);
+            EndPaint(hwnd, &paint);
+        }
+    }
+
+    fn paint_terminal(&self, memory: HDC) {
+        let padding = px(self.dpi, PADDING);
+        let origin_y = self.layout.height + padding;
+        // SAFETY: the caller owns the back buffer and restores its font after drawing.
+        unsafe {
+            let terminal = self.current().terminal.lock().unwrap();
             let screen = terminal.screen();
             let (rows, columns) = screen.size();
             for row in 0..rows {
@@ -365,8 +525,8 @@ impl State {
                         cells.next();
                         wide = true;
                     }
-                    let x = PADDING + i32::from(column) * self.fonts.width;
-                    let y = PADDING + i32::from(row) * self.fonts.height;
+                    let x = padding + i32::from(column) * self.fonts.width;
+                    let y = origin_y + i32::from(row) * self.fonts.height;
                     let width = self.fonts.width * if wide { 2 } else { 1 };
                     let rect = RECT {
                         left: x,
@@ -430,8 +590,8 @@ impl State {
             {
                 let (row, column) = screen.cursor_position();
                 if row < rows && column < columns {
-                    let x = PADDING + i32::from(column) * self.fonts.width;
-                    let y = PADDING + i32::from(row) * self.fonts.height;
+                    let x = padding + i32::from(column) * self.fonts.width;
+                    let y = origin_y + i32::from(row) * self.fonts.height;
                     let cursor_width = (self.fonts.width / 6).max(1);
                     let rect = RECT {
                         left: x,
@@ -444,25 +604,80 @@ impl State {
                     DeleteObject(brush);
                 }
             }
-            drop(terminal);
-            BitBlt(
-                target,
-                0,
-                0,
-                client.right,
-                client.bottom,
-                memory,
-                0,
-                0,
-                SRCCOPY,
-            );
-            SelectObject(memory, previous_font);
-            SelectObject(memory, previous_bitmap);
-            DeleteObject(bitmap);
-            DeleteDC(memory);
-            EndPaint(hwnd, &paint);
         }
     }
+}
+
+enum Shortcut {
+    New,
+    Close,
+    Cycle { backward: bool },
+}
+
+fn tab_shortcut(code: u16, modifiers: Modifiers) -> Option<Shortcut> {
+    if !modifiers.control || modifiers.alt {
+        return None;
+    }
+    match code {
+        VK_TAB => Some(Shortcut::Cycle {
+            backward: modifiers.shift,
+        }),
+        0x54 if modifiers.shift => Some(Shortcut::New),
+        0x57 if modifiers.shift => Some(Shortcut::Close),
+        _ => None,
+    }
+}
+
+fn point(lparam: LPARAM) -> POINT {
+    POINT {
+        x: lparam as i16 as i32,
+        y: (lparam >> 16) as i16 as i32,
+    }
+}
+
+// No State borrow may span a call that pumps messages (including error dialogs).
+unsafe fn refresh(hwnd: HWND, state: *mut State, redraw: bool) {
+    unsafe {
+        if (*state).tabs.is_empty() {
+            DestroyWindow(hwnd);
+            return;
+        }
+        if std::mem::take(&mut (*state).title_dirty) {
+            let tab = (*state).current();
+            let title = if tab.title == "winsh" {
+                wide("winsh")
+            } else {
+                wide(&format!("{} — winsh", tab.title))
+            };
+            SetWindowTextW(hwnd, title.as_ptr());
+        }
+        if redraw {
+            InvalidateRect(hwnd, ptr::null(), 0);
+        }
+        if let Some(error) = (*state).error.take() {
+            window_message(hwnd, &error, true);
+        }
+    }
+}
+
+unsafe fn activate(hwnd: HWND, state: *mut State, control: Control) {
+    unsafe {
+        if let Err(error) = (*state).activate(control) {
+            (*state).error = Some(format!("Could not open a tab.\n\n{error}"));
+        }
+        refresh(hwnd, state, true);
+    }
+}
+
+fn invalidate_bar(hwnd: HWND, layout: &Layout) {
+    let bounds = RECT {
+        left: 0,
+        top: 0,
+        right: layout.width,
+        bottom: layout.height,
+    };
+    // SAFETY: the RECT is valid for this call on the live window.
+    unsafe { InvalidateRect(hwnd, &bounds, 0) };
 }
 
 // Only the messages that need State borrow its pointer. In particular, default
@@ -488,6 +703,52 @@ unsafe extern "system" fn window_proc(
             return DefWindowProcW(hwnd, message, wparam, lparam);
         }
         match message {
+            WM_NCCALCSIZE if !state.is_null() => {
+                // Both forms start with a RECT. Keep Windows' side and bottom
+                // borders, and its offscreen resize margin when maximized.
+                let rect = lparam as *mut RECT;
+                let top = (*rect).top;
+                DefWindowProcW(hwnd, message, wparam, lparam);
+                (*rect).top = if IsZoomed(hwnd) != 0 {
+                    (*rect).top - GetSystemMetricsForDpi(SM_CYCAPTION, (*state).dpi)
+                } else {
+                    top
+                };
+                0
+            }
+            WM_NCHITTEST if !state.is_null() => {
+                let mut pt = point(lparam);
+                ScreenToClient(hwnd, &mut pt);
+                let layout = &(*state).layout;
+                if pt.x < 0 || pt.x >= layout.width || pt.y < 0 || pt.y >= layout.height {
+                    return DefWindowProcW(hwnd, message, wparam, lparam);
+                }
+                if pt.y < px((*state).dpi, 5) && IsZoomed(hwnd) == 0 {
+                    let edge = px((*state).dpi, 9);
+                    return (if pt.x < edge {
+                        HTTOPLEFT
+                    } else if pt.x >= layout.width - edge {
+                        HTTOPRIGHT
+                    } else {
+                        HTTOP
+                    }) as LRESULT;
+                }
+                match layout.hit(pt.x, pt.y) {
+                    Some(Control::Minimize) => HTMINBUTTON as LRESULT,
+                    Some(Control::Maximize) => HTMAXBUTTON as LRESULT,
+                    Some(Control::CloseWindow) => HTCLOSE as LRESULT,
+                    Some(_) => HTCLIENT as LRESULT,
+                    None => HTCAPTION as LRESULT,
+                }
+            }
+            WM_GETMINMAXINFO if !state.is_null() => {
+                let result = DefWindowProcW(hwnd, message, wparam, lparam);
+                let minimum = &mut (*(lparam as *mut MINMAXINFO)).ptMinTrackSize;
+                minimum.x = minimum.x.max(px((*state).dpi, 420));
+                minimum.y = minimum.y.max(px((*state).dpi, 150));
+                result
+            }
+            WM_NCACTIVATE => DefWindowProcW(hwnd, message, wparam, -1),
             WM_CLOSE => {
                 DestroyWindow(hwnd);
                 0
@@ -507,9 +768,11 @@ unsafe extern "system" fn window_proc(
                 0
             }
             WM_DPICHANGED if !state.is_null() => {
-                if let Ok(fonts) = Fonts::new((wparam as u32 & 0xffff).max(96)) {
+                let dpi = (wparam as u32 & 0xffff).max(96);
+                if let Ok(fonts) = Fonts::new(dpi) {
                     (*state).fonts = fonts;
                 }
+                (*state).dpi = dpi;
                 let rect = &*(lparam as *const RECT);
                 SetWindowPos(
                     hwnd,
@@ -532,14 +795,33 @@ unsafe extern "system" fn window_proc(
                 0
             }
             WM_TIMER if !state.is_null() => {
-                let close = (*state).tick(hwnd);
-                if close {
-                    DestroyWindow(hwnd);
-                }
+                let redraw = (*state).tick();
+                refresh(hwnd, state, redraw);
                 0
             }
+            WM_SYSKEYDOWN if wparam == usize::from(VK_F4) => {
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
             WM_KEYDOWN | WM_SYSKEYDOWN if !state.is_null() => {
-                let handled = (*state).key_down(wparam as u16, modifiers(), hwnd);
+                let mods = modifiers();
+                if let Some(shortcut) = tab_shortcut(wparam as u16, mods) {
+                    if lparam & (1 << 30) == 0 {
+                        let index = (*state).active;
+                        let count = (*state).tabs.len();
+                        let control = match shortcut {
+                            Shortcut::New => Control::New,
+                            Shortcut::Close => Control::CloseTab(index),
+                            Shortcut::Cycle { backward } => Control::Tab(if backward {
+                                (index + count - 1) % count
+                            } else {
+                                (index + 1) % count
+                            }),
+                        };
+                        activate(hwnd, state, control);
+                    }
+                    return 0;
+                }
+                let handled = (*state).key_down(wparam as u16, mods, hwnd);
                 if handled {
                     0
                 } else {
@@ -554,7 +836,11 @@ unsafe extern "system" fn window_proc(
                 if unit == 9 || (modifiers.control && modifiers.shift && matches!(unit, 3 | 22)) {
                     return 0;
                 }
-                let mut text = (*state).text.push(if unit == 8 { 127 } else { unit });
+                if message == WM_SYSCHAR && unit == 32 {
+                    return DefWindowProcW(hwnd, message, wparam, lparam);
+                }
+                let tab = (*state).current_mut();
+                let mut text = tab.text.push(if unit == 8 { 127 } else { unit });
                 if message == WM_SYSCHAR && !text.is_empty() {
                     text.insert(0, '\x1b');
                 }
@@ -571,10 +857,77 @@ unsafe extern "system" fn window_proc(
                 0
             }
             WM_MOUSEWHEEL if !state.is_null() => {
-                (*state).wheel += (wparam >> 16) as i16 as i32;
-                let lines = (*state).wheel / 120 * 3;
-                (*state).wheel %= 120;
-                (*state).terminal.lock().unwrap().scroll(lines);
+                let tab = (*state).current_mut();
+                tab.wheel += (wparam >> 16) as i16 as i32;
+                let lines = tab.wheel / 120 * 3;
+                tab.wheel %= 120;
+                tab.terminal.lock().unwrap().scroll(lines);
+                0
+            }
+            WM_SETCURSOR if !state.is_null() && lparam as u16 == HTCLIENT as u16 => {
+                let mut pt = POINT::default();
+                GetCursorPos(&mut pt);
+                ScreenToClient(hwnd, &mut pt);
+                let cursor = if pt.y < (*state).layout.height {
+                    IDC_ARROW
+                } else {
+                    IDC_IBEAM
+                };
+                SetCursor(LoadCursorW(ptr::null_mut(), cursor));
+                1
+            }
+            WM_MOUSEMOVE | WM_NCMOUSEMOVE if !state.is_null() => {
+                let nc = message == WM_NCMOUSEMOVE;
+                let mut pt = point(lparam);
+                if nc {
+                    ScreenToClient(hwnd, &mut pt);
+                }
+                let hit = (*state).layout.hit(pt.x, pt.y);
+                if (*state).hover != hit {
+                    (*state).hover = hit;
+                    invalidate_bar(hwnd, &(*state).layout);
+                }
+                if hit.is_some() {
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE | if nc { TME_NONCLIENT } else { 0 },
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    TrackMouseEvent(&mut track);
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+            WM_MOUSELEAVE | WM_NCMOUSELEAVE if !state.is_null() => {
+                if (*state).hover.take().is_some() {
+                    invalidate_bar(hwnd, &(*state).layout);
+                }
+                DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK if !state.is_null() => {
+                let pt = point(lparam);
+                (*state).pressed = (*state).layout.hit(pt.x, pt.y);
+                if (*state).pressed.is_some() {
+                    SetCapture(hwnd);
+                    invalidate_bar(hwnd, &(*state).layout);
+                }
+                0
+            }
+            WM_LBUTTONUP if !state.is_null() => {
+                let pt = point(lparam);
+                let pressed = (*state).pressed.take();
+                let hit = (*state).layout.hit(pt.x, pt.y);
+                if GetCapture() == hwnd {
+                    ReleaseCapture();
+                }
+                if let Some(control) = pressed.filter(|&c| Some(c) == hit) {
+                    activate(hwnd, state, control);
+                }
+                0
+            }
+            WM_CAPTURECHANGED if !state.is_null() => {
+                (*state).pressed = None;
+                invalidate_bar(hwnd, &(*state).layout);
                 0
             }
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
@@ -722,6 +1075,43 @@ fn color(color: vt100::Color, default: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_tab_can_update_and_exit_while_the_selected_shell_keeps_its_state() {
+        let program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        let mut state = State::new(&program, &["/d".into(), "/q".into()], 96).unwrap();
+        state.send(b"set WINSH_TAB_TEST=first\recho ready\r".to_vec());
+        state.activate(Control::New).unwrap();
+        state.send(b"if not defined WINSH_TAB_TEST title independent tab\r".to_vec());
+        state.select(0);
+        let wait = |state: &mut State, ready: fn(&State) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !ready(state) {
+                state.tick();
+                assert!(state.error.is_none(), "{:?}", state.error);
+                assert!(Instant::now() < deadline, "timed out waiting for shell");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(&mut state, |s| s.tabs[1].title.ends_with("independent tab"));
+        state.resize(680, 360);
+        wait(&mut state, |s| {
+            s.tabs
+                .iter()
+                .all(|t| t.terminal.lock().unwrap().screen().size() == s.size)
+        });
+        state.send(b"if \"%WINSH_TAB_TEST%\"==\"first\" title original tab\r".to_vec());
+        wait(&mut state, |s| s.current().title.ends_with("original tab"));
+        state.select(1);
+        state.send(b"exit 19\r".to_vec());
+        state.select(0);
+        wait(&mut state, |s| s.tabs.len() == 1);
+        assert!(state.current().title.ends_with("original tab"));
+        assert_eq!(state.status, 0);
+        state.send(b"exit 37\r".to_vec());
+        wait(&mut state, |s| s.tabs.is_empty());
+        assert_eq!(state.status, 37);
+    }
 
     #[test]
     fn symbol_padding_respects_neighboring_text_and_cell_attributes() {

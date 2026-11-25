@@ -46,7 +46,7 @@ session available. The next edit retries the build.
 When a successful build changes either executable, the watcher opens a new
 session at the repo root and closes its previous window and foreground programs.
 Other winsh windows keep running their original binaries. Type `exit` in the
-watched window, close it, or press Ctrl+C in the watching PowerShell to stop.
+last tab, close the window, or press Ctrl+C in the watching PowerShell to stop.
 
 ## Other shells and arguments
 
@@ -61,8 +61,16 @@ using Windows argument quoting. `--help` displays a controls and usage dialog.
 
 ## Controls and display
 
+Each title-bar tab hosts a separate shell with its own screen and scrollback.
+New tabs start with the launcher's working directory, executable, and arguments.
+Click a tab to switch sessions. When the strip fills up, the chevrons reveal
+more tabs on either side. Drag the space beside the tabs to move the window.
+
 | Input | Behavior |
 | --- | --- |
+| + or Ctrl+Shift+T | Open a tab. |
+| Ctrl+Tab / Ctrl+Shift+Tab | Switch to the next / previous tab, wrapping at the ends. |
+| Tab's × or Ctrl+Shift+W | Close that tab or the active tab, respectively. Closing the last tab closes the window. |
 | Text, Enter, Backspace | Console input and editing supplied by the hosted program. |
 | Arrow keys, Home/End, Insert/Delete, F1–F12 | Terminal key sequences, including application cursor mode and modifiers. |
 | Ctrl+C | Send an interrupt through ConPTY; winsh keeps the session open. |
@@ -70,8 +78,9 @@ using Windows argument quoting. `--help` displays a controls and usage dialog.
 | Ctrl+Shift+V or Shift+Insert | Paste Unicode clipboard text; bracketed paste when requested by the application. |
 | Ctrl+Shift+C | Copy the visible screen as plain text. |
 | Mouse wheel or Shift+PageUp/PageDown | Browse up to 5,000 lines of scrollback. Typing returns to the live screen. |
-| Resize window | Resize both the terminal grid and the hosted console. |
-| `exit` or close window | End the session and close the window. |
+| Resize window | Resize the grid and hosted console in every tab. |
+| `exit` | End the current shell and close its tab. |
+| Close window | End all sessions in the window. |
 
 The terminal renders a cell grid with cursor movement, erasing, scrolling,
 alternate screens, cursor visibility, ANSI/256/RGB colors, bold, italic,
@@ -98,7 +107,7 @@ and drains output while releasing ConPTY to avoid pipe deadlocks.
 
 ## Current limits
 
-This milestone has one window and one session. It has no tabs, settings UI,
+The terminal has no settings UI,
 mouse selection, terminal mouse reporting, search, hyperlinks, font zoom,
 graphics protocols, or saved sessions. Copying copies the whole visible screen.
 Font fallback and complex emoji shaping are limited by GDI. Width changes

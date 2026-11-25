@@ -1,4 +1,4 @@
-//! File utilities bundled with the shell. Paths and streams belong to the session.
+//! Utilities bundled with the shell. Paths and streams belong to the session.
 use std::{
     ffi::{OsStr, OsString},
     fs::File,
@@ -13,6 +13,8 @@ use crate::{Shell, ShellIo, platform};
 mod files;
 mod grep;
 mod ls;
+#[cfg(windows)]
+mod pkg;
 
 /// Utilities bundled in winsh. Embedders can run them with explicit session I/O.
 #[derive(Clone, Copy)]
@@ -23,18 +25,22 @@ pub enum Utility {
     Ls,
     Mkdir,
     Mv,
+    #[cfg(windows)]
+    Pkg,
     Rm,
     Touch,
 }
 
 impl Utility {
-    pub(crate) const COMMANDS: [(&'static str, Self); 8] = [
+    pub(crate) const COMMANDS: &'static [(&'static str, Self)] = &[
         ("cat", Self::Cat),
         ("cp", Self::Cp),
         ("grep", Self::Grep),
         ("ls", Self::Ls),
         ("mkdir", Self::Mkdir),
         ("mv", Self::Mv),
+        #[cfg(windows)]
+        ("pkg", Self::Pkg),
         ("rm", Self::Rm),
         ("touch", Self::Touch),
     ];
@@ -42,7 +48,8 @@ impl Utility {
     pub fn from_name(name: &OsStr) -> Option<Self> {
         let name = name.to_str()?;
         Self::COMMANDS
-            .into_iter()
+            .iter()
+            .copied()
             .find(|(command, _)| *command == name)
             .map(|(_, utility)| utility)
     }
@@ -61,6 +68,8 @@ impl Utility {
             Self::Cat => ("cat", 1, cat(shell, args, io)),
             Self::Grep => ("grep", 2, grep::run(shell, args, io)),
             Self::Ls => ("ls", 2, ls::run(shell, args, io)),
+            #[cfg(windows)]
+            Self::Pkg => ("pkg", 1, pkg::run(shell, args, io)),
             Self::Mkdir => return files::run(self, "mkdir", "p", shell, args, io),
             Self::Touch => return files::run(self, "touch", "acm", shell, args, io),
             Self::Cp => return files::run(self, "cp", "rR", shell, args, io),

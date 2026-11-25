@@ -45,6 +45,27 @@ The input loop accepts UTF-8 redirected source and normalizes CRLF to LF.
 Interactive Windows input is decoded from the console's UTF-16. Command strings
 passed through `-c` are preserved as supplied.
 
+## Installing Windows packages
+
+Use `pkg install python3` in a Windows winsh prompt or script. Winsh uses
+WinGet to install the official Python install manager from the Microsoft Store
+if `pymanager.exe` is missing from PATH. It then runs `pymanager.exe install 3`
+to install the interpreter. Check the result with `python3 --version`.
+[Python on Windows](https://docs.python.org/3/using/windows.html#installing-runtimes)
+
+For other packages, use the exact ID from WinGet's search results.
+
+~~~sh
+winget search git
+pkg install Git.Git
+~~~
+
+`pkg install` takes one package at a time. WinGet handles package selection
+from your configured sources, license prompts, and any required elevation.
+If an installer adds a directory to PATH, open a fresh terminal to pick it up.
+If winsh cannot find `winget.exe`, install or update Microsoft's App Installer
+and check `winget --version`. [Microsoft's WinGet guide](https://learn.microsoft.com/en-us/windows/package-manager/winget/)
+
 ## Aliases and startup configuration
 
 Interactive Winsh sessions start with this alias for the bundled `ls` utility.

@@ -8,6 +8,20 @@ use std::{
 fn main() {
     let mut args = env::args_os().skip(1);
     match args.next().unwrap().to_str().unwrap() {
+        "install" => {
+            // Stand in for WinGet and the Python install manager on an isolated PATH.
+            let exe = env::current_exe().unwrap();
+            println!("{} install", exe.file_stem().unwrap().to_string_lossy());
+            for arg in args {
+                println!("[{}]", arg.to_string_lossy());
+            }
+            if let Ok(code) = env::var("WINSH_TEST_INSTALL_STATUS") {
+                process::exit(code.parse().unwrap());
+            }
+            if exe.ends_with("winget.exe") && exe.with_file_name("pending.exe").exists() {
+                std::fs::rename(exe.with_file_name("pending.exe"), exe.with_file_name("pymanager.exe")).unwrap();
+            }
+        }
         "args" => {
             let mut out = io::stdout().lock();
             for arg in args {

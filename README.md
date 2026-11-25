@@ -51,6 +51,19 @@ Use forward slashes in paths, or single-quote Windows paths containing
 backslashes: `cd 'C:\Program Files'`. Native programs on PATH run by name;
 use `./program.exe` for a program in the current directory.
 
+On Windows, install Python 3 from the winsh prompt using WinGet, the package
+manager that ships with App Installer.
+
+~~~sh
+pkg install python3
+python3 --version
+~~~
+
+For other tools, find the package ID with `winget search`, then use it directly,
+for example `pkg install Git.Git`. Start winsh normally. Windows prompts for
+administrator access when an installer needs it.
+[Installing Windows packages](docs/shell.md#installing-windows-packages)
+
 From PowerShell, execute one command or inspect the available options:
 
 ~~~powershell

@@ -294,6 +294,59 @@ fn cli(args: &[&str], input: &[u8]) -> Output {
     child.wait_with_output().unwrap()
 }
 
+#[cfg(windows)]
+#[test]
+fn pkg_installs_python_runtime_and_reuses_its_manager() {
+    let mut f = Fixture::new();
+    f.run("export PATH=.");
+    fs::copy(helper(), f.root.0.join("winget.exe")).unwrap();
+    fs::copy(helper(), f.root.0.join("python3.exe")).unwrap();
+    fs::copy(helper(), f.root.0.join("pending.exe")).unwrap();
+
+    assert_eq!(f.run("pkg install python3").status(), 0);
+    assert_eq!(f.run("pkg install python3").status(), 0);
+    assert_eq!(
+        f.out(),
+        "winget install\n[--exact]\n[--id]\n[9NQ7512CXL7T]\n[--source]\n[msstore]\npymanager install\n[3]\npymanager install\n[3]\n"
+    );
+    assert_eq!(
+        f.run("WINSH_TEST_INSTALL_STATUS=19 pkg install python3")
+            .status(),
+        19
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn pkg_uses_exact_ids_and_preserves_install_failures() {
+    let mut f = Fixture::new();
+    f.run("export PATH=.");
+    for source in [
+        "pkg",
+        "pkg remove Git.Git",
+        "pkg install ''",
+        "pkg install --help",
+        "pkg install A B",
+    ] {
+        assert_eq!(f.run(source).status(), 2, "{source}");
+    }
+    assert_eq!(f.run("pkg install Git.Git").status(), 127);
+    assert!(f.err().contains("App Installer"));
+    fs::copy(helper(), f.root.0.join("winget.exe")).unwrap();
+    assert_eq!(f.run("command pkg install 'one & two' >args").status(), 0);
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("args")).unwrap(),
+        "winget install\n[--exact]\n[--id]\n[one & two]\n"
+    );
+    assert_eq!(
+        f.run("WINSH_TEST_INSTALL_STATUS=23 pkg install python3")
+            .status(),
+        23
+    );
+    assert_eq!(f.run("pkg install python3").status(), 127);
+    assert!(f.err().contains("Manage app execution aliases"));
+}
+
 #[test]
 fn directory_changes_preserve_session_state_without_changing_the_host() {
     let host = env::current_dir().unwrap();

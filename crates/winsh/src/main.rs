@@ -14,9 +14,11 @@ const HELP: &str = "A native Windows shell with Bash-compatible syntax.
 Usage: winsh [--help | --version]
        winsh -c <command> [name [arguments...]]
        winsh [--] <script> [arguments...]
-       winsh --utility <cat|cp|grep|ls|mkdir|mv|rm|touch> [arguments...]
+       winsh --utility <name> [arguments...]
 
 With no arguments, read commands from the terminal or standard input.
+Bundled utilities include cat, cp, grep, ls, mkdir, mv, rm, and touch.
+On Windows, use pkg install python3 or pkg install <WinGet-package-ID>.
 
 Options:
   -c            Execute a command string and exit

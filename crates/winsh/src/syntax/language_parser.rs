@@ -93,7 +93,9 @@ impl Parser<'_> {
         let mut script = Script::default();
         self.skip_trivia();
         while self.peek().is_some() && !stops.iter().any(|stop| self.keyword(stop)) {
+            let start = self.pos;
             let mut list = AndOr {
+                background: None,
                 pipelines: vec![self.language_pipeline(depth)?],
                 operators: Vec::new(),
             };
@@ -117,26 +119,22 @@ impl Parser<'_> {
                 list.operators.push(op);
                 list.pipelines.push(self.language_pipeline(depth)?);
             }
+            if self.peek() == Some('&') {
+                list.background = Some(self.source[start..self.pos].trim_end().to_owned());
+            }
             script.lists.push(list);
             self.skip_spaces();
             if self.peek() == Some('#') {
                 self.skip_comment();
             }
             match self.peek() {
-                Some(';') => {
+                Some(';' | '&') => {
                     self.pos += 1;
                     self.skip_trivia();
                 }
                 Some('\n') => self.skip_trivia(),
                 None => break,
                 Some(')') if stops.contains(&")") => break,
-                Some('&') => {
-                    return Err(self.error(
-                        ParseErrorKind::UnsupportedSyntax("background commands"),
-                        self.pos,
-                        1,
-                    ));
-                }
                 Some(ch) => {
                     return Err(self.error(
                         ParseErrorKind::Unexpected("token; expected a command separator"),
@@ -155,9 +153,11 @@ impl Parser<'_> {
     }
 
     fn language_pipeline(&mut self, depth: usize) -> Result<ScriptPipeline, ParseError> {
+        let start = self.pos;
         let negated = self.take_keyword("!");
         self.skip_trivia();
         let mut pipeline = ScriptPipeline {
+            label: None,
             commands: vec![self.language_command(depth)?],
             connections: Vec::new(),
             negated,
@@ -180,6 +180,9 @@ impl Parser<'_> {
             }
             pipeline.connections.push(connection);
             pipeline.commands.push(self.language_command(depth)?);
+        }
+        if pipeline.uses_subshell() {
+            pipeline.label = Some(self.source[start..self.pos].trim_end().to_owned());
         }
         Ok(pipeline)
     }

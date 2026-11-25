@@ -91,6 +91,111 @@ fn quote(value: impl AsRef<std::ffi::OsStr>) -> String {
 }
 
 #[test]
+fn job_control_stops_native_work_and_retains_pipeline_status() {
+    let mut f = Fixture::new();
+    f.shell
+        .set_job_executable(env!("CARGO_BIN_EXE_winsh").into());
+    let child = quote(helper());
+    let command = format!("{child} gated-mark | cat && exit 37");
+    assert_eq!(
+        f.run(&format!("{command} & pid=$!; jobs")),
+        Outcome::Continue(0)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !f.root.0.join("ready").is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker did not start: {}",
+            f.err()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.run("kill -STOP %1; jobs"), Outcome::Continue(0));
+    fs::write(f.root.0.join("release"), b"go").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    assert!(
+        !f.root.0.join("passed").exists(),
+        "a stopped native stage kept running"
+    );
+    assert_eq!(f.run("bg %1; wait \"$pid\""), Outcome::Continue(37));
+    assert!(f.root.0.join("passed").is_file());
+    assert!(f.out().contains("[1] Running") && f.out().contains("[1] Stopped"));
+    assert_eq!(f.run("wait %1"), Outcome::Continue(127));
+}
+
+#[test]
+fn background_lists_inherit_shell_state_and_isolate_changes() {
+    let mut f = Fixture::new();
+    f.shell
+        .set_job_executable(env!("CARGO_BIN_EXE_winsh").into());
+    f.shell
+        .set_arguments("script".into(), vec!["positional".into()]);
+    fs::write(f.root.0.join("input"), "from-file\n").unwrap();
+    assert_eq!(
+        f.run(
+            r#"
+        private=value
+        task() { read -r line; echo "$private $line $1"; private=changed; exit 9; }
+        false || task "$1" <input >result & id=$!
+        wait "$id"; echo "$? $private"
+        true & false & wait
+    "#
+        ),
+        Outcome::Continue(0)
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("result")).unwrap(),
+        "value from-file positional\n"
+    );
+    assert_eq!(f.out(), "9 value\n");
+    let nested = format!("{}true{} & wait %4", "{ ".repeat(24), "; }".repeat(24));
+    assert_eq!(f.run(&nested), Outcome::Continue(0));
+}
+
+#[cfg(windows)]
+#[test]
+#[allow(unsafe_code)]
+fn shell_shutdown_reaps_a_stopped_jobs_native_descendants() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::WAIT_OBJECT_0,
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+    let mut f = Fixture::new();
+    f.shell
+        .set_job_executable(env!("CARGO_BIN_EXE_winsh").into());
+    assert_eq!(
+        f.run(&format!("{} spawn-gated &", quote(helper()))),
+        Outcome::Continue(0)
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = fs::read_to_string(f.root.0.join("ready"))
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "grandchild failed to start: {}",
+            f.err()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    // SAFETY: request wait access only, and own the returned handle until the check ends.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(!handle.is_null());
+    let grandchild = unsafe { OwnedHandle::from_raw_handle(handle) };
+    assert_eq!(f.run("stop %1"), Outcome::Continue(0));
+    drop(f.shell);
+    assert_eq!(
+        unsafe { WaitForSingleObject(grandchild.as_raw_handle(), 3_000) },
+        WAIT_OBJECT_0
+    );
+}
+
+#[test]
 fn completion_uses_session_lookup_and_shell_word_boundaries() {
     let mut fixture = Fixture::new();
     let work = fixture.root.0.join("work");

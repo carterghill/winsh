@@ -5,6 +5,7 @@ use crate::{Outcome, Shell, ShellIo, platform};
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
     ["cd", "pwd", "exit"]
         .into_iter()
+        .chain(crate::jobs::BUILTINS.iter().copied())
         .chain(crate::language_builtins::NAMES.iter().copied())
 }
 
@@ -23,6 +24,9 @@ pub(crate) fn dispatch(
         Some("pwd") => pwd(shell, args, io)?,
         Some("cd") => cd(shell, args, io)?,
         Some("exit") => exit(shell, args, io)?,
+        Some(name) if crate::jobs::BUILTINS.contains(&name) => {
+            Outcome::Continue(shell.jobs.builtin(name, args, io)?)
+        }
         Some(name) if crate::language_builtins::NAMES.contains(&name) => {
             crate::language_builtins::dispatch(shell, name, args, io)?
         }

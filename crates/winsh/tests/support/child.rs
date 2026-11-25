@@ -65,6 +65,19 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(250));
             std::fs::write(path, b"completed").unwrap();
         }
+        "gated-mark" => {
+            std::fs::write("ready", process::id().to_string()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !std::path::Path::new("release").exists() {
+                if std::time::Instant::now() >= deadline { process::exit(98); }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            std::fs::write("passed", b"done").unwrap();
+        }
+        "spawn-gated" => {
+            let status = process::Command::new(env::current_exe().unwrap()).arg("gated-mark").status().unwrap();
+            process::exit(status.code().unwrap_or(1));
+        }
         "wait" => {
             println!("ready");
             io::stdout().flush().unwrap();

@@ -12,7 +12,7 @@ use std::{
     ptr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -32,11 +32,11 @@ use windows_sys::Win32::{
         Pipes::CreatePipe,
         Threading::{
             CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-            DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread,
-            STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-            WaitForSingleObject,
+            DeleteProcThreadAttributeList, EVENT_MODIFY_STATE, EXTENDED_STARTUPINFO_PRESENT,
+            GetExitCodeProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+            OpenEventW, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread,
+            STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent, TerminateProcess,
+            UpdateProcThreadAttribute, WaitForSingleObject,
         },
     },
 };
@@ -55,6 +55,7 @@ pub enum Event {
 }
 
 pub struct Session {
+    stop_event: Vec<u16>,
     input: mpsc::Sender<Vec<u8>>,
     control: mpsc::Sender<Control>,
     events: mpsc::Receiver<Event>,
@@ -69,7 +70,14 @@ impl Session {
         columns: u16,
         terminal: Arc<Mutex<Terminal>>,
     ) -> io::Result<Self> {
-        let mut resources = Resources::create(program, arguments, rows, columns)?;
+        static NEXT_SESSION: AtomicUsize = AtomicUsize::new(1);
+        let name = format!(
+            "Local\\winsh-stop-{}-{}",
+            std::process::id(),
+            NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
+        );
+        let stop_event = wide(OsStr::new(&name))?;
+        let mut resources = Resources::create(program, arguments, rows, columns, &name)?;
         let mut output = resources.console.output.take().expect("new output pipe");
         let (input, writes) = mpsc::channel::<Vec<u8>>();
         let (control, controls) = mpsc::channel();
@@ -170,6 +178,7 @@ impl Session {
             let _ = events_send.send(Event::Exited(status));
         });
         Ok(Self {
+            stop_event,
             input,
             control,
             events,
@@ -178,6 +187,19 @@ impl Session {
     }
 
     pub fn write(&self, bytes: Vec<u8>) -> io::Result<()> {
+        // Ctrl+Z is a console input character on Windows. A foreground winsh
+        // job advertises a stop event; all other hosted programs get normal input.
+        if bytes == [26] {
+            // SAFETY: NUL-terminated name; take ownership only on successful open.
+            let raw = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, self.stop_event.as_ptr()) };
+            if !raw.is_null() {
+                let event = unsafe { OwnedHandle::from_raw_handle(raw) };
+                if unsafe { SetEvent(event.as_raw_handle()) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                return Ok(());
+            }
+        }
         self.input
             .send(bytes)
             .map_err(|_| io::ErrorKind::BrokenPipe.into())
@@ -224,11 +246,17 @@ struct Resources {
 }
 
 impl Resources {
-    fn create(program: &Path, arguments: &[OsString], rows: u16, columns: u16) -> io::Result<Self> {
+    fn create(
+        program: &Path,
+        arguments: &[OsString],
+        rows: u16,
+        columns: u16,
+        stop_event: &str,
+    ) -> io::Result<Self> {
         let program = program.canonicalize()?;
         let application = wide(program.as_os_str())?;
         let mut command = command_line(program.as_os_str(), arguments)?;
-        let environment = terminal_environment();
+        let environment = terminal_environment(stop_event);
         let (input_read, input_write) = pipe()?;
         let (output_read, output_write) = pipe()?;
         let mut handle = 0;
@@ -422,11 +450,15 @@ fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
 
 // The child runs in our VT terminal even if the launcher inherited TERM=dumb.
 // CreateProcessW expects sorted, NUL-terminated name=value pairs and a final NUL.
-fn terminal_environment() -> Vec<u16> {
+fn terminal_environment(stop_event: &str) -> Vec<u16> {
     let mut vars: Vec<_> = std::env::vars_os()
-        .filter(|(name, _)| !name.eq_ignore_ascii_case("TERM"))
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("TERM")
+                && !name.eq_ignore_ascii_case("WINSH_TERMINAL_STOP_EVENT")
+        })
         .collect();
     vars.push(("TERM".into(), "vt100".into()));
+    vars.push(("WINSH_TERMINAL_STOP_EVENT".into(), stop_event.into()));
     vars.sort_by_cached_key(|(name, _)| name.to_string_lossy().to_uppercase());
     let mut block = Vec::new();
     for (name, value) in vars {

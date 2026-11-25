@@ -223,7 +223,7 @@ fn syntax_tree_keeps_nested_compounds_and_incomplete_input() {
     for source in [
         "then echo x",
         "if; then :; fi",
-        "echo x &",
+        "echo x & &",
         "echo x ;;",
         "echo x; case y in",
         "for x do echo x; done",

@@ -250,7 +250,7 @@ fn text_part(
         let name = &rest[..length];
         if name == "@" {
             positional(quoted, shell, builder);
-        } else if matches!(name, "!" | "-") {
+        } else if name == "-" {
             return Err(ExpansionError {
                 message: format!("${name} is not supported"),
                 span: part.span.clone(),
@@ -288,7 +288,7 @@ fn parameter(
     }
     let len = if expression.starts_with(|c: char| c.is_ascii_digit()) {
         expression.bytes().take_while(u8::is_ascii_digit).count()
-    } else if expression.starts_with(|c: char| "@*#?$".contains(c)) {
+    } else if expression.starts_with(|c: char| "@*#?$!".contains(c)) {
         1
     } else {
         expression

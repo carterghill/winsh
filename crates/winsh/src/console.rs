@@ -60,7 +60,12 @@ mod windows {
     // Protect the shell process. ReadConsoleW reports interrupted input itself,
     // and native child exit status reports interruption during execution.
     unsafe extern "system" fn handler(event: u32) -> i32 {
-        i32::from(matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT))
+        match event {
+            CTRL_C_EVENT => winsh::interrupt_foreground(),
+            CTRL_BREAK_EVENT => winsh::stop_foreground(),
+            _ => return 0,
+        }
+        1
     }
 
     pub struct Handler;

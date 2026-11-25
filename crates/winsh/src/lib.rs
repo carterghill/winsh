@@ -8,6 +8,7 @@ mod completion;
 mod exec;
 mod expand;
 mod glob;
+mod jobs;
 mod language_builtins;
 mod pipeline;
 mod platform;
@@ -17,6 +18,7 @@ mod streams;
 mod utilities;
 
 pub use completion::CompletionContext;
+pub use jobs::{interrupt_foreground, stop_foreground};
 pub use shell::{Outcome, Shell};
 pub use streams::ShellIo;
 pub use utilities::Utility;

@@ -13,7 +13,7 @@ fn main() {
             match option.to_str() {
                 Some("--help" | "-h") => {
                     window::message(
-                        "winsh terminal\n\nUsage: winsh-terminal [--shell <executable>] [-- <shell arguments>]\n\nBy default, launches winsh.exe beside this executable.\nBuild both executables with: cargo build --workspace\n\nCtrl+Shift+V / Shift+Insert: paste\nCtrl+Shift+C: copy visible screen\nMouse wheel / Shift+PageUp / Shift+PageDown: scroll\nCtrl+C: interrupt input or the foreground program",
+                        "winsh terminal\n\nUsage: winsh-terminal [--shell <executable>] [-- <shell arguments>]\n\nBy default, launches winsh.exe beside this executable.\nBuild both executables with: cargo build --workspace\n\nCtrl+Shift+V / Shift+Insert: paste\nCtrl+Shift+C: copy visible screen\nMouse wheel / Shift+PageUp / Shift+PageDown: scroll\nCtrl+C: interrupt input or the foreground program\nCtrl+Z: stop the foreground winsh job",
                         false,
                     );
                     return Ok(0);

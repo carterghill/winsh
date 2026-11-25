@@ -13,37 +13,51 @@ pub use parser::parse_script;
 pub use parser::valid_name;
 pub use parser::{parse_pipeline, parse_simple_command};
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 pub struct Script {
     pub lists: Vec<AndOr>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AndOr {
+    /// Original command text when the list was terminated by an asynchronous '&'.
+    pub background: Option<String>,
     pub pipelines: Vec<ScriptPipeline>,
     pub operators: Vec<ListOperator>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListOperator {
     And,
     Or,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ScriptPipeline {
+    /// Display text for a pipeline or subshell that can run as a foreground job.
+    pub label: Option<String>,
     pub commands: Vec<Command>,
     pub connections: Vec<PipeKind>,
     pub negated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ScriptPipeline {
+    pub(crate) fn uses_subshell(&self) -> bool {
+        self.commands.len() > 1
+            || self
+                .commands
+                .first()
+                .is_some_and(|c| matches!(c.kind, CommandKind::Group { subshell: true, .. }))
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Command {
     pub kind: CommandKind,
     pub redirections: Vec<Redirection>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum CommandKind {
     Simple(SimpleCommand),
     Group {
@@ -78,14 +92,14 @@ pub struct Pipeline {
     pub span: Range<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
     Stdout,
     StdoutAndStderr,
 }
 
 /// A command's words before expansion or command lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SimpleCommand {
     pub words: Vec<Word>,
     /// Kept in source order, independently of intervening command words.
@@ -94,7 +108,7 @@ pub struct SimpleCommand {
     pub span: Range<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Redirection {
     /// None selects the operator's default descriptor. Only 0, 1, 2 are supported.
     pub descriptor: Option<u8>,
@@ -103,7 +117,7 @@ pub struct Redirection {
     pub span: Range<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectionKind {
     Input,
     Output,
@@ -117,13 +131,13 @@ pub enum RedirectionKind {
 }
 
 /// Adjacent quoted and unquoted pieces form one shell word.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Word {
     pub parts: Vec<WordPart>,
     pub span: Range<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WordPart {
     pub kind: WordPartKind,
     /// Original source range, including quote delimiters or escape backslashes.
@@ -133,7 +147,7 @@ pub struct WordPart {
 
 /// Quote context is structural, so escaped `$` and `*` remain distinguishable
 /// from characters that may trigger expansion later. Empty quotes are retained.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum WordPartKind {
     /// Unquoted text at word level; quoted text inside `DoubleQuoted`.
     /// Simple references such as `$HOME`, `~`, and `*.rs` remain unevaluated.

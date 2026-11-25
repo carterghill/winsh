@@ -105,6 +105,7 @@ pub(crate) fn spawn(
         let mut child = Shell::with_environment(shell.cwd.clone(), shell.environment.clone())?;
         child.source_depth = shell.source_depth + 1;
         child.cancellation = shell.cancellation.clone();
+        child.jobs = shell.jobs.clone();
         child
             .utility_executable
             .clone_from(&shell.utility_executable);
@@ -147,7 +148,7 @@ pub(crate) fn spawn(
     }
 }
 
-fn resolve(shell: &Shell, program: &OsStr) -> io::Result<PathBuf> {
+pub(crate) fn resolve(shell: &Shell, program: &OsStr) -> io::Result<PathBuf> {
     if program.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,

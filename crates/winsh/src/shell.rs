@@ -1,5 +1,5 @@
 use crate::{
-    ShellIo, Utility, builtins, exec, expand, pipeline, platform, redirect,
+    ShellIo, Utility, builtins, expand, pipeline, platform, redirect,
     streams::Stream,
     syntax::{self, Command, CommandKind, Script, ScriptPipeline, Word, WordPartKind},
 };
@@ -39,6 +39,8 @@ pub(crate) struct SavedVariable {
 /// Explicit session state; the engine never changes the host cwd or environment.
 #[derive(Clone)]
 pub struct Shell {
+    pub(crate) shell_pid: u32,
+    pub(crate) jobs: crate::jobs::Jobs,
     pub(crate) cwd: PathBuf,
     pub(crate) environment: Vec<(OsString, OsString)>,
     pub(crate) variables: BTreeMap<String, OsString>,
@@ -56,7 +58,7 @@ pub struct Shell {
     capture_depth: usize,
     script_depth: usize,
     abort_script: bool,
-    last_status: i32,
+    pub(crate) last_status: i32,
 }
 impl Shell {
     pub fn new() -> io::Result<Self> {
@@ -74,6 +76,8 @@ impl Shell {
         }
         platform::require_directory(&cwd)?;
         let mut shell = Self {
+            shell_pid: std::process::id(),
+            jobs: Default::default(),
             cwd,
             environment: environment.into_iter().collect(),
             variables: BTreeMap::new(),
@@ -144,6 +148,7 @@ impl Shell {
     ) -> io::Result<Outcome> {
         self.evaluate_pipeline(
             &ScriptPipeline {
+                label: None,
                 commands: pipeline
                     .commands
                     .iter()
@@ -178,6 +183,12 @@ impl Shell {
                 io.err(format_args!("winsh: invalid command-list syntax tree\n"))?;
                 return Ok(self.record(Outcome::Continue(2)));
             }
+            if let Some(label) = &list.background {
+                let mut task = list.clone();
+                task.background = None;
+                outcome = self.launch_list(task, label, io)?;
+                continue;
+            }
             for (index, pipeline) in list.pipelines.iter().enumerate() {
                 if self
                     .cancellation
@@ -204,7 +215,7 @@ impl Shell {
         }
         Ok(outcome)
     }
-    fn evaluate_pipeline(
+    pub(crate) fn evaluate_pipeline(
         &mut self,
         pipeline: &ScriptPipeline,
         io: &mut ShellIo,
@@ -213,6 +224,10 @@ impl Shell {
         {
             io.err(format_args!("winsh: invalid pipeline syntax tree\n"))?;
             return Ok(self.record(Outcome::Continue(2)));
+        }
+        if self.jobs.interactive && pipeline.uses_subshell() {
+            // The worker evaluates the full pipeline, including its negation.
+            return self.launch_pipeline(pipeline, io);
         }
         let outcome = if pipeline.commands.len() == 1 {
             self.command(&pipeline.commands[0], io, false)?
@@ -405,13 +420,13 @@ impl Shell {
             let status = if let Some(executable) = &self.utility_executable {
                 let mut child_args = vec![executable.as_os_str().to_owned(), "--utility".into()];
                 child_args.extend_from_slice(arguments);
-                exec::run(self, &child_args, io)?
+                self.run_program(&child_args, Some(utility), io)?
             } else {
                 utility.run(self, &arguments[1..], io)?
             };
             Ok(Outcome::Continue(status))
         } else {
-            Ok(Outcome::Continue(exec::run(self, arguments, io)?))
+            Ok(Outcome::Continue(self.run_program(arguments, None, io)?))
         }
     }
     fn compound(&mut self, kind: &CommandKind, io: &mut ShellIo) -> io::Result<Outcome> {
@@ -592,7 +607,7 @@ impl Shell {
     pub fn interrupt(&mut self) {
         self.last_status = 130;
     }
-    fn record(&mut self, outcome: Outcome) -> Outcome {
+    pub(crate) fn record(&mut self, outcome: Outcome) -> Outcome {
         self.last_status = outcome.status();
         outcome
     }
@@ -653,7 +668,9 @@ impl Shell {
         } else if let Ok(n) = name.parse::<usize>() {
             n > 0 && n <= self.positional.len()
         } else {
-            matches!(name, "?" | "#" | "$" | "@" | "*") || self.var(name).is_some()
+            matches!(name, "?" | "#" | "$" | "@" | "*")
+                || (name == "!" && self.jobs.last_pid.is_some())
+                || self.var(name).is_some()
         }
     }
     pub(crate) fn parameter(&self, name: &str) -> OsString {
@@ -661,7 +678,13 @@ impl Shell {
             "0" => self.arg0.clone(),
             "?" => self.last_status.to_string().into(),
             "#" => self.positional.len().to_string().into(),
-            "$" => std::process::id().to_string().into(),
+            "$" => self.shell_pid.to_string().into(),
+            "!" => self
+                .jobs
+                .last_pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_default()
+                .into(),
             "*" | "@" => {
                 let separator = self
                     .var("IFS")

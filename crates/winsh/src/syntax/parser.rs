@@ -115,8 +115,8 @@ impl Parser<'_> {
                 '&' if self.following() == Some('>') => {
                     redirections.push(self.redirection(None, self.pos)?)
                 }
-                '&' if self.following() == Some('&') => break,
-                '&' | '(' => {
+                '&' => break,
+                '(' => {
                     return Err(self.error(
                         ParseErrorKind::UnsupportedSyntax("shell operator"),
                         self.pos,

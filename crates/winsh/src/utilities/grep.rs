@@ -26,7 +26,7 @@ struct Options {
 }
 
 impl Options {
-    fn parse(mut args: &[OsString]) -> Result<(Self, RegexSet, &[OsString]), String> {
+    fn parse(mut args: &[OsString]) -> Result<(Self, Vec<&str>, &[OsString]), String> {
         let mut options = Self::default();
         let mut patterns = Vec::new();
         while let Some((arg, rest)) = args.split_first() {
@@ -75,6 +75,9 @@ impl Options {
             patterns.push(arg.to_str().ok_or("pattern must be UTF-8")?);
             args = rest;
         }
+        Ok((options, patterns, args))
+    }
+    fn regex(&self, patterns: &[&str]) -> Result<RegexSet, String> {
         let expressions = patterns
             .iter()
             .flat_map(|pattern| {
@@ -82,18 +85,21 @@ impl Options {
                     .split_terminator('\n')
                     .chain(pattern.is_empty().then_some(""))
             })
-            .map(|pattern| match options.syntax {
+            .map(|pattern| match self.syntax {
                 Syntax::Fixed => regex::escape(pattern),
                 Syntax::Extended | Syntax::Basic => {
-                    expression(pattern, options.syntax == Syntax::Basic)
+                    expression(pattern, self.syntax == Syntax::Basic)
                 }
             });
-        let regex = RegexSetBuilder::new(expressions)
-            .case_insensitive(options.ignore_case)
+        RegexSetBuilder::new(expressions)
+            .case_insensitive(self.ignore_case)
             .build()
-            .map_err(|error| format!("invalid pattern: {error}"))?;
-        Ok((options, regex, args))
+            .map_err(|error| format!("invalid pattern: {error}"))
     }
+}
+
+pub(super) fn files(args: &[OsString]) -> Option<&[OsString]> {
+    Options::parse(args).ok().map(|(_, _, files)| files)
 }
 
 // Translate the POSIX spelling of literals and BRE operators for the regex engine.
@@ -152,13 +158,17 @@ fn expression(pattern: &str, basic: bool) -> String {
 }
 
 pub(super) fn run(shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
-    let (options, regex, files) = match Options::parse(args) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            io.err(format_args!("grep: {error}\n"))?;
-            return Ok(2);
-        }
-    };
+    let (options, regex, files) =
+        match Options::parse(args).and_then(|(options, patterns, files)| {
+            let regex = options.regex(&patterns)?;
+            Ok((options, regex, files))
+        }) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                io.err(format_args!("grep: {error}\n"))?;
+                return Ok(2);
+            }
+        };
     let output = if options.quiet || options.count {
         None
     } else {

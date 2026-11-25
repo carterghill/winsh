@@ -66,7 +66,7 @@ using Windows argument quoting. `--help` displays a controls and usage dialog.
 | Text, Enter, Backspace | Console input and editing supplied by the hosted program. |
 | Arrow keys, Home/End, Insert/Delete, F1–F12 | Terminal key sequences, including application cursor mode and modifiers. |
 | Ctrl+C | Send an interrupt through ConPTY; winsh keeps the session open. |
-| Ctrl+Z, Enter | Windows console end-of-input. |
+| Ctrl+Z | Stop a foreground winsh job. At the shell prompt, send Windows end-of-input. |
 | Ctrl+Shift+V or Shift+Insert | Paste Unicode clipboard text; bracketed paste when requested by the application. |
 | Ctrl+Shift+C | Copy the visible screen as plain text. |
 | Mouse wheel or Shift+PageUp/PageDown | Browse up to 5,000 lines of scrollback. Typing returns to the live screen. |
@@ -97,8 +97,9 @@ truncate or extend existing rows rather than reflowing old text. Scrollback
 has no scrollbar. This is a basic VT terminal, not full xterm compatibility.
 
 The hosted program owns command-line editing. Winsh supports persistent history
-and Tab completion in this window. Background jobs and job control remain on
-the shell roadmap. Pipelines and redirections
+and Tab completion in this window. Winsh owns the job table and the lifecycle
+of background pipelines. The terminal forwards Ctrl+Z to a foreground job
+through a session-specific event. Pipelines and redirections
 are implemented by winsh and work inside this window; see [the shell guide](shell.md#redirections-and-pipelines).
 The terminal itself adds no language rules or script-file support.
 
@@ -116,7 +117,8 @@ resizing as observed by a console child, startup failure, and descendant cleanup
 Two ignored test entries are subprocess fixtures used by those integration
 tests, not additional manual checks.
 
-The opt-in shell tests cover Tab completion, persistent command recall across terminal restarts,
+The opt-in shell tests cover suspending and resuming jobs, foreground input,
+Ctrl+C isolation, Tab completion, persistent command recall across terminal restarts,
 canceling multiline input, interrupting foreground programs and a native
 pipeline, and preserving the shell's exit status.
 

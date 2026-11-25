@@ -84,7 +84,11 @@ The input loop requests another line; complete file/command-string input reports
 status 2. Missing redirection operands are syntax errors rather than continuation
 requests. NUL bytes are rejected. Excessive compound/expansion nesting is rejected.
 
-Here-documents/strings, process substitution, background `&`, `case`, `select`,
+A single `&` terminates an asynchronous AND/OR list, including its pipelines.
+The next command can begin on the same line. Quoting or escaping `&` keeps it
+in a word. The operators `&&`, `|&`, `&>`, and `>&` keep their usual meanings.
+
+Here-documents/strings, process substitution, `case`, `select`,
 `[[ ... ]]`, `function` spelling, arrays, brace expansion, backticks, ANSI-C
 quoting, and descriptors above 2 are outside the current grammar. Unsupported
 features report errors where recognized; this remains a Bash subset.

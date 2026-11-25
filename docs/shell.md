@@ -1,7 +1,7 @@
 # The working shell
 
 The shell implements scripts, navigation, redirections, streaming pipelines,
-and native foreground execution. It is a supported subset of Bash, with Windows
+background jobs, and foreground job control. It is a supported subset of Bash, with Windows
 paths and programs.
 
 ## Running commands
@@ -34,9 +34,8 @@ Windows C runtime rules.
 
 Unclosed quotes, trailing operators, and unfinished compound commands request another
 input line using the `> ` prompt. On Windows, Ctrl+C cancels pending input or
-interrupts foreground pipeline programs without closing winsh. A child can
-define its own Ctrl+C behavior.
-`exit` leaves the shell; Ctrl+Z provides console end-of-input.
+interrupts the foreground job. At the prompt, `exit` leaves the shell and
+Ctrl+Z provides console end-of-input.
 
 Redirected standard input reads commands without prompts. Native children inherit
 stdin and can consume the bytes after their command line; the input reader
@@ -137,6 +136,51 @@ end the input loop. Blank lines and comments preserve the previous status.
 Invalid numeric exit arguments terminate with 2; extra arguments after a valid
 number report 1 and keep the input loop running. This last behavior currently
 also applies to redirected input, unlike Bash's noninteractive exit handling.
+
+## Background jobs and job control
+
+End a command, pipeline, or `&&`/`||` list with `&` to start it in the background.
+The prompt prints the job number and worker PID. For example, try this in winsh
+and press Ctrl+Z after `fg` to stop the job and get the prompt back.
+
+~~~sh
+powershell.exe -NoProfile -Command 'Start-Sleep 60' &
+jobs
+fg %1
+~~~
+
+| Command or key | Effect |
+| --- | --- |
+| `jobs` | List job numbers, PIDs, commands, and running, stopped, or completed status. |
+| Ctrl+Z in the dedicated terminal | Stop the foreground job, including native pipeline stages and descendants. At the shell prompt this key still signals EOF. |
+| `stop %1` | Pause a particular job. |
+| `bg %1` | Resume it in the background. |
+| `fg %1` | Give it the foreground and wait for it. A stopped job resumes. |
+| Ctrl+C during `fg` | Interrupt the foreground job tree and return status 130. |
+| `kill %1` | Terminate the job tree. The default Windows exit status is 143. |
+| `wait %1` or `wait "$!"` | Collect a job's exit status. With no arguments, wait for the running jobs. |
+
+`fg`, `bg`, and `stop` default to the current job. Use `%+` or `%%` for the
+current job, `%-` for the previous one, and `%N` for a numbered job. A bare
+number selects a worker PID owned by this shell. `$!` holds the most recent
+background PID. `kill` also accepts `-STOP`, `-CONT`, `-INT`, `-TERM`, and
+`-KILL`. Windows applies these operations to the whole job object. In other
+Windows console hosts, start the command with `&` and use `stop %1` to pause it.
+
+An asynchronous list starts with status 0 and runs with a copy of the launching
+shell's directory, variables, functions, and positional arguments. Its changes
+stay in that job. `wait` and `fg` return the pipeline or list's final status.
+A stop returns 148. The shell reports completion before the next prompt and
+retains recent exit statuses until collected. Exiting winsh cleans up its jobs.
+
+On Windows, a job started with `&` at the prompt gets a private input pipe.
+The bundled `cat` and `grep` commands also use this pipe when launched directly
+to read keyboard input. The shell forwards lines to the pipe while the job is
+in the foreground. Ctrl+D on an empty line closes it. In scripts, background
+input defaults to EOF. Explicit file and pipe redirections take precedence.
+Native Windows programs launched in the foreground can read the console
+directly. Resume those keyboard readers with `fg` because they share the
+console input buffer with the prompt.
 
 ## File utilities
 
@@ -349,10 +393,8 @@ descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is 
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.
 
-There is no arbitrary shebang dispatch, CDPATH lookup, configurable prompt, or
-background jobs yet.
-Windows Ctrl+C support covers foreground execution; Unix signal
-and job-control integration is deferred.
+Arbitrary shebang dispatch, CDPATH lookup, configurable prompts, `disown`, and
+shell signal traps remain outside the supported subset.
 
 ## Following a command through the code
 

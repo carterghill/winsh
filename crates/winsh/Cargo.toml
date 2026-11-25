@@ -10,9 +10,14 @@ description = "A native Windows shell with Bash-compatible syntax."
 regex = "1"
 rustyline = { version = "17", default-features = false, features = ["with-file-history", "custom-bindings"] }
 same-file = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["unbounded_depth"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_Debug"] }
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

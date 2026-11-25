@@ -24,10 +24,12 @@ Options:
   -V, --version Show the version
 
 Supports variables, expansions, lists, if/for/while/until, functions,
-redirections, pipelines, and native executables. See docs/shell.md for limits.";
+redirections, pipelines, and native executables. Use & to start a background job
+and jobs, fg, bg, stop, kill, or wait to manage it. See docs/shell.md for details.";
 
 enum Mode {
     Input,
+    JobWorker,
     Command(String, Vec<OsString>),
     Utility(Utility, Vec<OsString>),
     Script(OsString, Vec<OsString>),
@@ -40,6 +42,7 @@ fn options(mut args: impl Iterator<Item = OsString>) -> Result<Mode, &'static st
         return Ok(Mode::Input);
     };
     let mode = match first.to_str() {
+        Some("--job-worker") => Mode::JobWorker,
         Some("-h" | "--help") => Mode::Help,
         Some("-V" | "--version") => Mode::Version,
         Some("--utility") => {
@@ -106,7 +109,11 @@ fn run() -> io::Result<i32> {
         _ => {}
     }
     let mut shell = Shell::new()?;
+    shell.set_job_executable(env::current_exe()?);
     let mut streams = ShellIo::inherited();
+    if matches!(mode, Mode::JobWorker) {
+        return shell.run_job_worker(streams);
+    }
     if let Mode::Utility(utility, args) = mode {
         return utility.run(&shell, &args, &mut streams);
     }
@@ -140,12 +147,15 @@ fn run() -> io::Result<i32> {
             Ok(shell.run(&source, &mut streams)?.status())
         }
         Mode::Input => {
+            if interactive {
+                shell.enable_interactive_jobs();
+            }
             if interactive && let Ok(label) = env::var("WINSH_DEV_BUILD") {
                 writeln!(io::stderr(), "winsh dev build {label}")?;
             }
             input_loop(&mut shell, &mut streams, interactive)
         }
-        Mode::Utility(..) | Mode::Help | Mode::Version => unreachable!(),
+        Mode::Utility(..) | Mode::JobWorker | Mode::Help | Mode::Version => unreachable!(),
     }
 }
 
@@ -153,6 +163,9 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
     let mut input = interactive::Input::new(interactive)?;
     let mut pending = String::new();
     loop {
+        if interactive && pending.is_empty() {
+            shell.report_finished_jobs(streams)?;
+        }
         let mut line = String::new();
         let read = input.read_line(shell, &pending, &mut line);
         if matches!(&read, Err(error) if error.kind() == io::ErrorKind::Interrupted) {

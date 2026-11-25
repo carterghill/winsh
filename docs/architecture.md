@@ -37,6 +37,7 @@ on the engine and launches the shell executable as a separate process.
 | `arithmetic` / `glob` | Integer expressions and pathname patterns. |
 | `shell` | Directory, variables, environment, arguments, functions, status, and evaluation. |
 | `exec` | Executable lookup and foreground child lifecycle. |
+| `jobs` | Worker startup, process groups, terminal ownership, job selection, and exit statuses. |
 | `pipeline` | Starting concurrent stages, isolated built-ins, and waiting for every stage. |
 | `redirect` | Opening files and applying descriptor changes in source order. |
 | `builtins` / `language_builtins` | Navigation, script state/control, tests, and basic text I/O. |
@@ -44,6 +45,10 @@ on the engine and launches the shell executable as a separate process.
 | `platform` | Native paths, exit statuses, and process launch details. |
 | `streams` | Explicit standard I/O handles shared by built-ins and children. |
 | `console` | Executable-only console input and Windows Ctrl+C handling. |
+
+The CLI uses its own executable to host jobs. Embedders can set the path with
+`Shell::set_job_executable`. Otherwise the engine looks up `winsh` in the
+session's `PATH` when a job needs a worker.
 
 The command flow is:
 
@@ -152,10 +157,12 @@ no shell framework, async runtime, or GUI toolkit dependency.
 6. **Implemented subset:** bundled ls, cat, and grep support directory listings,
    file input, redirections, and pipelines. Script tests cover concatenation and log
    filtering. See [file utilities](shell.md#file-utilities) for options and statuses.
-7. **Implemented subset:** interactive line editing, persistent command history,
-   and Tab completion for commands and paths. Background jobs and job control
-   are still open. See [interactive history](shell.md#interactive-history) and
-   [Tab completion](shell.md#tab-completion).
+7. **Implemented:** interactive editing, persistent history, Tab completion,
+   background jobs, and foreground control. Each job runs in a separate winsh
+   worker. Windows assigns the worker to a kill-on-close job object before
+   releasing its command, so pipelines and their descendants can be stopped,
+   resumed, or terminated together. See [interactive history](shell.md#interactive-history),
+   [Tab completion](shell.md#tab-completion), and [job control](shell.md#background-jobs-and-job-control).
 
 Test behavior at the lowest useful level: pure parser tests, engine tests with
 explicit state and I/O, and Windows integration tests for processes and

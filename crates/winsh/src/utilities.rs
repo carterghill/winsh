@@ -33,6 +33,15 @@ impl Utility {
             .map(|(_, utility)| utility)
     }
 
+    pub(crate) fn reads_stdin(self, args: &[OsString]) -> bool {
+        let files = match self {
+            Self::Cat => cat_options(args).ok().map(|(_, _, files)| files),
+            Self::Grep => grep::files(args),
+            Self::Ls => None,
+        };
+        files.is_some_and(|files| operands(files).any(|f| f == "-"))
+    }
+
     pub fn run(self, shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
         let (name, failure, result) = match self {
             Self::Cat => ("cat", 1, cat(shell, args, io)),
@@ -88,7 +97,7 @@ fn open_input(
     Ok(Box::new(file))
 }
 
-fn cat(shell: &Shell, mut args: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
+fn cat_options(mut args: &[OsString]) -> Result<(bool, bool, &[OsString]), char> {
     let mut number = false;
     let mut nonblank = false;
     while let Some((arg, rest)) = args.split_first() {
@@ -108,14 +117,22 @@ fn cat(shell: &Shell, mut args: &[OsString], io: &mut ShellIo) -> io::Result<i32
                 'n' => number = true,
                 'b' => nonblank = true,
                 'u' => {}
-                _ => {
-                    io.err(format_args!("cat: unknown option -{flag}\n"))?;
-                    return Ok(1);
-                }
+                _ => return Err(flag),
             }
         }
         args = rest;
     }
+    Ok((number, nonblank, args))
+}
+
+fn cat(shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
+    let (number, nonblank, args) = match cat_options(args) {
+        Ok(parsed) => parsed,
+        Err(flag) => {
+            io.err(format_args!("cat: unknown option -{flag}\n"))?;
+            return Ok(1);
+        }
+    };
     let output = output_id(io)?;
     let mut status = 0;
     let mut at_line_start = true;

@@ -98,13 +98,20 @@ impl ShellIo {
         &mut self.streams[1]
     }
     pub(crate) fn inherits_console_input(&self) -> bool {
-        matches!(self.streams[0], Stream::Inherited(0)) && io::stdin().is_terminal()
+        self.input_inherited() && io::stdin().is_terminal()
+    }
+    pub(crate) fn input_inherited(&self) -> bool {
+        matches!(self.streams[0], Stream::Inherited(0))
+    }
+    pub(crate) fn input_closed(&self) -> bool {
+        matches!(self.streams[0], Stream::Closed)
     }
     pub(crate) fn input_file(&self) -> io::Result<File> {
         match &self.streams[0] {
             Stream::Inherited(fd) => inherited_file(*fd),
             Stream::File(file) => file.try_clone(),
             Stream::Reader(pipe) => Ok(File::from(OwnedIo::from(pipe.try_clone()?))),
+            Stream::Writer(pipe) => Ok(File::from(OwnedIo::from(pipe.try_clone()?))),
             _ => Err(bad_descriptor()),
         }
     }

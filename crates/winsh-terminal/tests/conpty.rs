@@ -263,6 +263,49 @@ fn winsh_interactive_smoke() {
 
 #[test]
 #[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_controls_foreground_and_background_jobs() {
+    let h = Harness::shell(Path::new(""));
+    h.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("job-" + "ready"); Start-Sleep 60' | cat"#);
+    h.wait_for("\njob-ready");
+    h.session.write(vec![26]).unwrap();
+    h.wait_for("[1] Stopped");
+    wait_for_prompt(&h);
+    h.enter("bg %1");
+    h.wait_for("[1] Running");
+    h.enter("grep -n needle &");
+    h.wait_for("[2] ");
+    h.enter("echo prompt-still-works");
+    h.wait_for("\nprompt-still-works");
+    h.enter("fg %2");
+    h.enter("needle from foreground");
+    h.wait_for("1:needle from foreground");
+    h.session.write(vec![3]).unwrap();
+    wait_for_prompt(&h);
+    h.enter("echo interrupt-$?; jobs %+ | grep -q Running && echo survivor-$?");
+    h.wait_for("\ninterrupt-130");
+    h.wait_for("\nsurvivor-0");
+    h.enter("! true | false && echo negation-works");
+    h.wait_for("\nnegation-works");
+    h.enter("stop %1; kill %1; wait %1; echo killed-$?");
+    h.wait_for("\nkilled-143");
+    h.enter("cat -n");
+    h.enter("reader-ready");
+    h.wait_for("1  reader-ready");
+    h.session.write(vec![26]).unwrap();
+    h.wait_for("[3] Stopped");
+    h.enter("bg; echo reader-in-background");
+    h.wait_for("\nreader-in-background");
+    h.enter("fg; echo reader-exited-$?");
+    h.enter("reader-resumed");
+    h.wait_for("2  reader-resumed");
+    h.session.write(vec![4]).unwrap();
+    h.wait_for("\nreader-exited-0");
+    h.enter("exit 0");
+    h.wait_for_exit(0);
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
 fn winsh_tab_completes_at_the_prompt() {
     let harness = Harness::shell(Path::new(""));
     // Remove host-dependent command matches and change the logical cwd.

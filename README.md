@@ -9,7 +9,9 @@ shell engine.
 
 The working shell supports interactive input, `.sh` scripts, variables and
 expansions, command lists, branches, loops, and functions, along with directory
-navigation, file redirections, streaming pipelines, and foreground native programs.
+navigation, file redirections, streaming pipelines, background jobs, and job
+control. See [background jobs and job control](docs/shell.md#background-jobs-and-job-control)
+for a Windows example.
 It implements a documented subset of Bash syntax on Windows.
 
 ## Try it

@@ -52,7 +52,7 @@ impl Builder {
             if glob && matches!(ch, '*' | '?' | '[') {
                 field.wildcard = true;
             }
-            if !glob && matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            if !glob && matches!(ch, '*' | '?' | '[' | ']' | '\\' | '-' | '!' | '^') {
                 field.pattern.push('\\');
             }
             field.pattern.push(ch);
@@ -60,7 +60,7 @@ impl Builder {
     }
     fn expanded(&mut self, value: &OsStr, quoted: bool, shell: &Shell) {
         if quoted || !self.split {
-            self.literal(value, false);
+            self.literal(value, !quoted);
             return;
         }
         let ifs = shell
@@ -68,7 +68,9 @@ impl Builder {
             .map(|v| v.to_string_lossy().into_owned())
             .unwrap_or_else(|| " \t\n".into());
         if ifs.is_empty() {
-            self.literal(value, true);
+            if !value.is_empty() {
+                self.literal(value, true);
+            }
             return;
         }
         for part in value.to_string_lossy().split_inclusive(|c| ifs.contains(c)) {
@@ -98,6 +100,45 @@ pub(crate) fn fields(
     io: &mut ShellIo,
     split: bool,
 ) -> Result<Vec<OsString>, ExpansionError> {
+    let builder = build_word(word, shell, io, split)?;
+    let mut result = Vec::new();
+    for field in builder.fields {
+        if !field.keep {
+            continue;
+        }
+        if split && field.wildcard {
+            let matches = crate::glob::paths(shell.cwd(), &field.pattern);
+            if !matches.is_empty() {
+                result.extend(matches);
+                continue;
+            }
+        }
+        result.push(field.value);
+    }
+    if !split && result.is_empty() {
+        result.push(OsString::new());
+    }
+    Ok(result)
+}
+
+pub(crate) fn case_pattern(
+    word: &Word,
+    shell: &mut Shell,
+    io: &mut ShellIo,
+) -> Result<String, ExpansionError> {
+    Ok(build_word(word, shell, io, false)?
+        .fields
+        .pop()
+        .unwrap()
+        .pattern)
+}
+
+fn build_word(
+    word: &Word,
+    shell: &mut Shell,
+    io: &mut ShellIo,
+    split: bool,
+) -> Result<Builder, ExpansionError> {
     let mut builder = Builder {
         fields: vec![Field::default()],
         split,
@@ -122,24 +163,7 @@ pub(crate) fn fields(
         }
         append(part, false, shell, io, &mut builder)?;
     }
-    let mut result = Vec::new();
-    for field in builder.fields {
-        if !field.keep {
-            continue;
-        }
-        if split && field.wildcard {
-            let matches = crate::glob::paths(shell.cwd(), &field.pattern);
-            if !matches.is_empty() {
-                result.extend(matches);
-                continue;
-            }
-        }
-        result.push(field.value);
-    }
-    if !split && result.is_empty() {
-        result.push(OsString::new());
-    }
-    Ok(result)
+    Ok(builder)
 }
 pub(crate) fn scalar(
     word: &Word,

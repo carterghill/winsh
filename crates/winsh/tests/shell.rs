@@ -960,6 +960,35 @@ fn redirection_paths_follow_shell_cwd_and_quote_aware_home_expansion() {
 }
 
 #[test]
+fn here_documents_feed_native_children_and_background_jobs() {
+    let mut f = Fixture::new();
+    f.shell
+        .set_job_executable(env!("CARGO_BIN_EXE_winsh").into());
+    let child = quote(helper());
+    let payload = "large payload 🦀 ".repeat(18_000);
+    let script = format!(
+        "case ok in ok) {child} copy <<'DOC' >copied;; esac &\n{payload}\nDOC\nwait \"$!\""
+    );
+    assert_eq!(f.run(&script).status(), 0, "{}", f.err());
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("copied")).unwrap(),
+        format!("{payload}\n")
+    );
+    assert_eq!(f.run("cat <<DOC 2>error <missing\nbody\nDOC").status(), 1);
+    assert!(
+        fs::read_to_string(f.root.0.join("error"))
+            .unwrap()
+            .contains("missing")
+    );
+    assert_eq!(
+        f.run("cat <missing <<DOC\n$(echo ran >marker)\nDOC")
+            .status(),
+        1
+    );
+    assert!(!f.root.0.join("marker").exists());
+}
+
+#[test]
 fn failed_redirections_prevent_builtins_and_use_previously_redirected_stderr() {
     let mut f = Fixture::new();
     fs::create_dir(f.root.0.join("sub")).unwrap();

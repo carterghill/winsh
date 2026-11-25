@@ -298,6 +298,17 @@ fn winsh_interactive_smoke() {
         harness.enter(line);
     }
     harness.wait_for("language-passed");
+    for line in [
+        "case ready in",
+        "r*) cat <<DOC",
+        "interactive-$((4+5))",
+        "DOC",
+        ";;",
+        "esac",
+    ] {
+        harness.enter(line);
+    }
+    harness.wait_for("\ninteractive-9");
     harness.enter("PATH='' ls -d . | cat | grep -nF .");
     harness.wait_for("1:.");
     harness.enter(r"printf 'ok\nError from pipeline\n' | cat | grep -in '^error'");

@@ -1,33 +1,77 @@
-use std::{ffi::OsString, fs::OpenOptions, io, path::Path};
+use std::{
+    ffi::OsStr,
+    fs::{File, OpenOptions},
+    io::{self, Write},
+    path::Path,
+};
 
-use crate::{Shell, ShellIo, platform, streams::Stream, syntax::RedirectionKind};
-
-pub(crate) struct Redirect {
-    pub descriptor: Option<u8>,
-    pub kind: RedirectionKind,
-    pub target: OsString,
-}
+use crate::{
+    Outcome, Shell, ShellIo, expand, platform,
+    streams::Stream,
+    syntax::{self, Redirection, RedirectionKind},
+};
 
 /// Apply in source order to stage-local streams. Earlier stderr redirections
 /// also govern diagnostics if a later open or descriptor duplication fails.
 pub(crate) fn apply(
-    shell: &Shell,
-    redirects: &[Redirect],
+    shell: &mut Shell,
+    redirects: &[Redirection],
     streams: &mut ShellIo,
-) -> io::Result<bool> {
+) -> io::Result<Option<Outcome>> {
     for redirect in redirects {
-        if let Err(error) = one(shell, redirect, streams) {
-            streams.err(format_args!(
-                "winsh: {}: {error}\n",
-                redirect.target.to_string_lossy()
-            ))?;
-            return Ok(false);
+        let result = if let Some(doc) = &redirect.here_document {
+            let body = if doc.quoted {
+                doc.body.as_str().into()
+            } else {
+                let expanded = syntax::parse_document_body(&doc.body)
+                    .map_err(|e| expand::error(&redirect.target, e.to_string()))
+                    .and_then(|word| expand::scalar(&word, shell, streams));
+                match expanded {
+                    Ok(value) => std::borrow::Cow::Owned(value.to_string_lossy().into_owned()),
+                    Err(error) => return shell.expansion_failure(error, streams).map(Some),
+                }
+            };
+            document_input(&body)
+                .and_then(|file| streams.set(redirect.descriptor.unwrap_or(0), Stream::File(file)))
+                .map_err(|error| format!("here-document: {error}"))
+        } else {
+            let fields = match expand::fields(&redirect.target, shell, streams, true) {
+                Ok(fields) => fields,
+                Err(error) => return shell.expansion_failure(error, streams).map(Some),
+            };
+            let [target] = fields.as_slice() else {
+                return shell
+                    .expansion_failure(
+                        expand::error(&redirect.target, "ambiguous redirect"),
+                        streams,
+                    )
+                    .map(Some);
+            };
+            one(shell, redirect, target, streams)
+                .map_err(|error| format!("{}: {error}", target.to_string_lossy()))
+        };
+        if let Err(error) = result {
+            streams.err(format_args!("winsh: {error}\n"))?;
+            return Ok(Some(Outcome::Continue(1)));
         }
     }
-    Ok(true)
+    Ok(None)
 }
 
-fn one(shell: &Shell, redirect: &Redirect, streams: &mut ShellIo) -> io::Result<()> {
+fn document_input(body: &str) -> io::Result<File> {
+    // A large document must be ready before the consumer starts, even if it
+    // never reads stdin. Pass it an independent, read-only file handle.
+    let mut file = tempfile::NamedTempFile::new()?;
+    file.write_all(body.as_bytes())?;
+    File::open(file.path())
+}
+
+fn one(
+    shell: &Shell,
+    redirect: &Redirection,
+    target: &OsStr,
+    streams: &mut ShellIo,
+) -> io::Result<()> {
     use RedirectionKind::*;
     let default = if matches!(redirect.kind, Input | ReadWrite | DuplicateInput) {
         0
@@ -36,7 +80,7 @@ fn one(shell: &Shell, redirect: &Redirect, streams: &mut ShellIo) -> io::Result<
     };
     let descriptor = redirect.descriptor.unwrap_or(default);
     if matches!(redirect.kind, DuplicateInput | DuplicateOutput) {
-        if let Some(text) = redirect.target.to_str() {
+        if let Some(text) = target.to_str() {
             if text == "-" {
                 return streams.set(descriptor, Stream::Closed);
             }
@@ -70,9 +114,15 @@ fn one(shell: &Shell, redirect: &Redirect, streams: &mut ShellIo) -> io::Result<
             ));
         }
     }
-    let path = platform::absolute(shell.cwd(), Path::new(&redirect.target))?;
+    let path = platform::absolute(shell.cwd(), Path::new(target))?;
     let mut options = OpenOptions::new();
     match redirect.kind {
+        HereDocument | HereDocumentStripTabs => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "missing here-document body",
+            ));
+        }
         Input => {
             options.read(true);
         }

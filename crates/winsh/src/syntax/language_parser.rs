@@ -1,32 +1,21 @@
 use super::*;
-use crate::syntax::{AndOr, Command, CommandKind, ListOperator, Script, ScriptPipeline};
+use crate::syntax::{
+    AndOr, CaseArm, CaseTerminator, Command, CommandKind, ListOperator, Script, ScriptPipeline,
+};
 
 /// Parse a complete script before executing any part of it.
 pub fn parse_script(source: &str) -> Result<Script, ParseError> {
-    parse_nested(source, 0)
-}
-pub(super) fn parse_nested(source: &str, nesting: usize) -> Result<Script, ParseError> {
-    if nesting > 32 {
-        return Err(ParseError {
-            kind: ParseErrorKind::UnsupportedSyntax(
-                "command substitution nesting beyond 32 levels",
-            ),
-            span: 0..source.len(),
-        });
-    }
     if let Some(start) = source.find('\0') {
         return Err(ParseError {
             kind: ParseErrorKind::NullByte,
             span: start..start + 1,
         });
     }
-    let mut parser = Parser {
-        source,
-        pos: 0,
-        nesting,
-    };
-    let script = parser.list(&[], 0)?;
-    parser.skip_trivia();
+    let mut parser = Parser::new(source, 0, 0);
+    let mut script = parser.list(&[], 0)?;
+    parser.skip_trivia()?;
+    parser.documents.check_complete()?;
+    parser.documents.attach_script(&mut script);
     if parser.peek().is_some() {
         return Err(parser.error(ParseErrorKind::Unexpected("token"), parser.pos, 1));
     }
@@ -34,9 +23,28 @@ pub(super) fn parse_nested(source: &str, nesting: usize) -> Result<Script, Parse
 }
 
 impl Parser<'_> {
+    pub(super) fn substitution(&mut self) -> Result<String, ParseError> {
+        let start = self.pos;
+        if self.nesting >= 32 {
+            return Err(self.error(
+                ParseErrorKind::UnsupportedSyntax("command substitution nesting beyond 32 levels"),
+                start,
+                0,
+            ));
+        }
+        let mut nested = Parser::new(self.source, start, self.nesting + 1);
+        nested.list(&[")"], 0)?;
+        nested.documents.check_complete()?;
+        if nested.peek() != Some(')') {
+            return Err(nested.error(ParseErrorKind::Expected(")"), start, nested.pos - start));
+        }
+        self.pos = nested.pos + 1;
+        Ok(self.source[start..nested.pos].to_owned())
+    }
+
     fn keyword_end(&mut self, text: &str) -> Option<usize> {
         self.skip_spaces();
-        let mut scan = *self;
+        let mut scan = Parser::new(self.source, self.pos, self.nesting);
         for ch in text.chars() {
             if scan.peek() != Some(ch) {
                 return None;
@@ -91,8 +99,8 @@ impl Parser<'_> {
             ));
         }
         let mut script = Script::default();
-        self.skip_trivia();
-        while self.peek().is_some() && !stops.iter().any(|stop| self.keyword(stop)) {
+        self.skip_trivia()?;
+        while self.peek().is_some() && !self.list_stop(stops) {
             let start = self.pos;
             let mut list = AndOr {
                 background: None,
@@ -112,7 +120,7 @@ impl Parser<'_> {
                     break;
                 };
                 self.pos += 2;
-                self.skip_trivia();
+                self.skip_trivia()?;
                 if self.peek().is_none() {
                     return Err(self.error(ParseErrorKind::MissingCommand, self.pos, 0));
                 }
@@ -127,12 +135,15 @@ impl Parser<'_> {
             if self.peek() == Some('#') {
                 self.skip_comment();
             }
+            if stops.contains(&";;") && self.case_terminator().is_some() {
+                break;
+            }
             match self.peek() {
                 Some(';' | '&') => {
                     self.pos += 1;
-                    self.skip_trivia();
+                    self.skip_trivia()?;
                 }
-                Some('\n') => self.skip_trivia(),
+                Some('\n') => self.skip_trivia()?,
                 None => break,
                 Some(')') if stops.contains(&")") => break,
                 Some(ch) => {
@@ -155,7 +166,7 @@ impl Parser<'_> {
     fn language_pipeline(&mut self, depth: usize) -> Result<ScriptPipeline, ParseError> {
         let start = self.pos;
         let negated = self.take_keyword("!");
-        self.skip_trivia();
+        self.skip_trivia()?;
         let mut pipeline = ScriptPipeline {
             label: None,
             commands: vec![self.language_command(depth)?],
@@ -174,7 +185,7 @@ impl Parser<'_> {
             } else {
                 PipeKind::Stdout
             };
-            self.skip_trivia();
+            self.skip_trivia()?;
             if self.peek().is_none() {
                 return Err(self.error(ParseErrorKind::MissingCommand, self.pos, 0));
             }
@@ -227,6 +238,8 @@ impl Parser<'_> {
                 branches,
                 otherwise,
             }
+        } else if self.take_keyword("case") {
+            self.case_command(depth)?
         } else if self.keyword("while") || self.keyword("until") {
             let until = self.take_keyword("until");
             if !until {
@@ -259,8 +272,7 @@ impl Parser<'_> {
             let mut separator = false;
             while self.peek() == Some('\n') {
                 separator = true;
-                self.pos += 1;
-                self.skip_spaces();
+                self.skip_trivia()?;
             }
             let words = if self.take_keyword("in") {
                 let mut words = Vec::new();
@@ -289,7 +301,7 @@ impl Parser<'_> {
             if words.is_none() && !separator && self.peek().is_some() {
                 return Err(self.error(ParseErrorKind::Unexpected("for separator"), self.pos, 0));
             }
-            self.skip_trivia();
+            self.skip_trivia()?;
             self.expect_keyword("do")?;
             let body = self.nonempty_list(&["done"], depth)?;
             self.expect_keyword("done")?;
@@ -304,13 +316,18 @@ impl Parser<'_> {
         } else if self.peek() == Some('(') {
             self.pos += 1;
             let body = self.nonempty_list(&[")"], depth)?;
-            self.expect_keyword(")")?;
+            if self.peek() != Some(')') {
+                return Err(self.error(ParseErrorKind::Expected(")"), self.pos, 0));
+            }
+            self.pos += 1;
             CommandKind::Group {
                 body,
                 subshell: true,
             }
         } else {
-            for reserved in ["then", "elif", "else", "fi", "do", "done", "}", "in"] {
+            for reserved in [
+                "then", "elif", "else", "fi", "do", "done", "}", "in", "esac",
+            ] {
                 if self.keyword(reserved) {
                     return Err(self.error(
                         ParseErrorKind::Unexpected("reserved word"),
@@ -319,7 +336,7 @@ impl Parser<'_> {
                     ));
                 }
             }
-            for unsupported in ["case", "esac", "select", "function", "coproc", "[[", "time"] {
+            for unsupported in ["select", "function", "coproc", "[[", "time"] {
                 if self.keyword(unsupported) {
                     return Err(self.error(
                         ParseErrorKind::UnsupportedSyntax(unsupported),
@@ -345,7 +362,7 @@ impl Parser<'_> {
                 self.pos += 1;
                 self.skip_spaces();
                 self.expect_keyword(")")?;
-                self.skip_trivia();
+                self.skip_trivia()?;
                 if !self.keyword("{") && self.peek() != Some('(') {
                     return Err(self.error(ParseErrorKind::Expected("function body"), self.pos, 0));
                 }
@@ -362,9 +379,10 @@ impl Parser<'_> {
                     body: Box::new(body),
                 }
             } else {
-                self.pos = start;
+                self.pos = possible_name.span.end;
+                let first = (!possible_name.parts.is_empty()).then_some(possible_name);
                 return Ok(Command {
-                    kind: CommandKind::Simple(self.command()?),
+                    kind: CommandKind::Simple(self.finish_command(start, first)?),
                     redirections: Vec::new(),
                 });
             }
@@ -402,6 +420,93 @@ impl Parser<'_> {
         }
         Ok(Command { kind, redirections })
     }
+
+    fn list_stop(&mut self, stops: &[&str]) -> bool {
+        stops.iter().any(|stop| match *stop {
+            ")" => self.peek() == Some(')'),
+            ";;" => self.case_terminator().is_some(),
+            keyword => self.keyword(keyword),
+        })
+    }
+
+    fn case_terminator(&self) -> Option<(CaseTerminator, usize)> {
+        if !self.source[self.pos..].starts_with(';') {
+            return None;
+        }
+        let mut scan = Parser::new(self.source, self.pos + 1, self.nesting);
+        let terminator = match scan.peek()? {
+            '&' => CaseTerminator::FallThrough,
+            ';' => {
+                scan.pos += 1;
+                if scan.peek() != Some('&') {
+                    return Some((CaseTerminator::Break, scan.pos - self.pos));
+                }
+                CaseTerminator::Retest
+            }
+            _ => return None,
+        };
+        Some((terminator, scan.pos + 1 - self.pos))
+    }
+
+    fn required_word(&mut self, description: &'static str) -> Result<Word, ParseError> {
+        self.skip_spaces();
+        let word = self.word()?;
+        if !word.parts.is_empty() {
+            return Ok(word);
+        }
+        let kind = if self.peek().is_none() {
+            ParseErrorKind::Expected(description)
+        } else {
+            ParseErrorKind::Unexpected(description)
+        };
+        Err(self.error(kind, self.pos, 0))
+    }
+
+    fn case_command(&mut self, depth: usize) -> Result<CommandKind, ParseError> {
+        let word = self.required_word("case word")?;
+        self.skip_trivia()?;
+        self.expect_keyword("in")?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_trivia()?;
+            if self.take_keyword("esac") {
+                break;
+            }
+            if self.peek() == Some('(') {
+                self.pos += 1;
+            }
+            let mut patterns = vec![self.required_word("case pattern or esac")?];
+            self.skip_spaces();
+            while self.peek() == Some('|') {
+                self.pos += 1;
+                patterns.push(self.required_word("case pattern")?);
+                self.skip_spaces();
+            }
+            if self.peek() != Some(')') {
+                let kind = if self.peek().is_none() {
+                    ParseErrorKind::Expected(")")
+                } else {
+                    ParseErrorKind::Unexpected("case pattern separator")
+                };
+                return Err(self.error(kind, self.pos, 0));
+            }
+            self.pos += 1;
+            let body = self.list(&[";;", "esac"], depth + 1)?;
+            let ending = self.case_terminator();
+            arms.push(CaseArm {
+                patterns,
+                body,
+                terminator: ending.map_or(CaseTerminator::Break, |(kind, _)| kind),
+            });
+            if let Some((_, size)) = ending {
+                self.pos += size;
+            } else {
+                self.expect_keyword("esac")?;
+                break;
+            }
+        }
+        Ok(CommandKind::Case { word, arms })
+    }
 }
 
 pub(super) fn plain(word: &Word) -> Option<&str> {
@@ -418,11 +523,7 @@ pub(super) fn plain(word: &Word) -> Option<&str> {
 
 /// Parameter default words are fragments: spaces and operators are text here.
 pub(crate) fn parse_fragment(source: &str) -> Result<Word, ParseError> {
-    let mut parser = Parser {
-        source,
-        pos: 0,
-        nesting: 0,
-    };
+    let mut parser = Parser::new(source, 0, 0);
     let mut parts = Vec::new();
     while let Some(ch) = parser.peek() {
         let start = parser.pos;

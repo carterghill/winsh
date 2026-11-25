@@ -395,7 +395,6 @@ fn missing_pipeline_stages_are_incomplete_but_missing_filenames_are_errors() {
         "cmd | | next",
         "cmd || next",
         "cmd && next",
-        "cmd <<EOF",
         "cmd <<<text",
         "cmd 9>file",
     ] {
@@ -407,6 +406,22 @@ fn missing_pipeline_stages_are_incomplete_but_missing_filenames_are_errors() {
             "{source}"
         );
     }
+    for source in ["cmd <<EOF", "cmd <<EOF\nbody\n", "cmd <<A <<B\nA\n"] {
+        assert!(
+            parse_pipeline(source).unwrap_err().is_incomplete(),
+            "{source}"
+        );
+    }
+    let pipeline = parse_pipeline("cat <<A | cat <<-'B'\none\nA\n\ttwo\n\tB")
+        .unwrap()
+        .unwrap();
+    let docs: Vec<_> = pipeline
+        .commands
+        .iter()
+        .map(|command| command.redirections[0].here_document.as_ref().unwrap())
+        .collect();
+    assert_eq!((&*docs[0].body, docs[0].quoted), ("one\n", false));
+    assert_eq!((&*docs[1].body, docs[1].quoted), ("two\n", true));
 }
 
 #[test]

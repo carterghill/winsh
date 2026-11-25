@@ -164,6 +164,9 @@ no shell framework, async runtime, or GUI toolkit dependency.
    releasing its command, so pipelines and their descendants can be stopped,
    resumed, or terminated together. See [interactive history](shell.md#interactive-history),
    [Tab completion](shell.md#tab-completion), and [job control](shell.md#background-jobs-and-job-control).
+8. **Implemented:** extend the scripting subset with `case` pattern matching
+   and `<<` / `<<-` here-documents. Bash comparison fixtures cover pattern
+   quoting, fallthrough, delimiter quoting, expansion, and redirection order.
 
 Test behavior at the lowest useful level: pure parser tests, engine tests with
 explicit state and I/O, and Windows integration tests for processes and

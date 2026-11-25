@@ -296,6 +296,7 @@ containing spaces, and quote or escape literal operator characters.
 | Syntax | Behavior |
 | --- | --- |
 | `<file`, `0<file` | Read stdin from an existing file. |
+| `<<word`, `<<-word` | Read a here-document. The dash strips leading tab characters from each body line and the closing delimiter. |
 | `>file`, `1>file` | Create or truncate stdout's file. |
 | `>>file`, `1>>file` | Create or append to stdout's file. |
 | `2>file`, `2>>file` | Redirect or append stderr. |
@@ -313,6 +314,20 @@ Only standard descriptors 0, 1, and 2 are supported. An adjacent unquoted number
 selects a descriptor: `2>errors` redirects stderr, while `2 >output` passes `2`
 as an argument and redirects stdout. Redirect-only commands such as `>file`
 create/truncate files and return 0 on success.
+
+A here-document starts on the next line and ends at a line containing only
+the delimiter. Quote or escape any part of the delimiter to keep the body
+literal. With an unquoted delimiter, winsh expands parameters, `$(...)`, and
+`$((...))` when the command runs. Spaces, quotes, and filename patterns in the
+body are preserved. A backslash can quote a dollar sign, backtick, backslash, or
+newline. Multiple documents on one command line are read from left to right.
+
+~~~sh
+name=winsh
+cat <<END
+hello from $name
+END
+~~~
 
 Redirections run from left to right. `program >all 2>&1` puts both outputs in
 `all`; `program 2>&1 >out` preserves stderr on the original stdout and sends only
@@ -339,7 +354,9 @@ session normally.
 The pipeline status is the last stage's status, including 126/127 for a failed
 last executable or 1 for a last-stage redirection failure. An earlier stage's
 failure does not override a successful final stage. `! pipeline` negates its
-status. Pipefail and asynchronous pipelines are not implemented. Earlier stages may fail
+status. End a pipeline with `&` to run it as a [background job](#background-jobs-and-job-control).
+The final stage determines its status when collected with `wait`. The `pipefail`
+option remains unsupported. Earlier stages may fail
 with a broken pipe if a downstream command exits early; the shell still waits
 for every stage. If an engine I/O failure aborts startup or waiting, guards kill
 and reap the native stages already started.
@@ -402,6 +419,7 @@ done
 | Pathname patterns | Unquoted `*`, `?`, and bracket/range/negated classes. Matches are sorted, exclude leading-dot names unless explicitly requested, and leave unmatched patterns literal. Use slash path separators. |
 | Lists | Newlines, `;`, `&&`, `||`, and pipeline negation `!`. AND/OR lists evaluate left to right and skip expansions in commands they skip. |
 | Branches | `if commands; then commands; elif commands; then commands; else commands; fi`. |
+| Pattern matching | `case word in pattern) commands ;; esac`. Alternatives use `|`. Patterns support `*`, `?`, and bracket classes/ranges, and can match slashes and leading dots. Quoting makes pattern characters literal. |
 | Loops | `for name in words; do commands; done`, `for name; do commands; done` over positional arguments, and `while` / `until commands; do commands; done`. |
 | Loop control | `break [positive-count]`, `continue [positive-count]`; counts can unwind nested loops. |
 | Groups | `{ commands; }` shares state; `(commands)` isolates state. Groups and compound commands can have redirections or be pipeline stages. |
@@ -411,6 +429,13 @@ Pipeline functions and compound commands use isolated session copies, like
 pipeline built-ins. Function definitions take effect when evaluated; their
 redirects apply when called. Parsing/recursion limits reject excessive nesting
 instead of allowing unbounded recursive evaluation.
+
+`case` expands its subject once, then tries patterns in source order. The
+`;;` terminator ends the match, `;&` runs the next arm unconditionally, and
+`;;&` resumes pattern testing. With no match, `case` returns 0. A matched arm
+returns its last command's status. An empty arm returns 0.
+Named bracket classes such as `[[:digit:]]` and `[[:alpha:]]` use ASCII
+membership. Extended glob patterns such as `@(one|two)` are outside this subset.
 
 | Additional built-in | Supported behavior |
 | --- | --- |
@@ -438,7 +463,7 @@ locale collation. These differences can affect cross-platform scripts.
 
 ## Current limits
 
-This is not a full Bash implementation. Arrays, associative arrays, `case`,
+This is not a full Bash implementation. Arrays, associative arrays,
 `select`, `[[ ... ]]`, arithmetic commands/for loops, arithmetic assignment,
 increment/decrement, exponentiation, ternary/comma operators, recursive variable
 expressions in arithmetic, pattern-removal/replacement/substring parameter
@@ -450,7 +475,7 @@ IFS edge cases, and escaped IFS characters in non-raw read are not fully Bash-co
 shopt), readonly variables, traps, and POSIX special-built-in error rules
 are not implemented. Unsupported built-in flags/forms report errors.
 
-Here-documents (`<<`, `<<-`), here-strings (`<<<`), process substitution, named
+Here-strings (`<<<`), process substitution, named
 descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is no
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.

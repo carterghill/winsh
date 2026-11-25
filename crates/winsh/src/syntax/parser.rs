@@ -28,21 +28,19 @@ pub fn parse_pipeline(source: &str) -> Result<Option<Pipeline>, ParseError> {
         });
     }
 
-    Parser {
-        source,
-        pos: 0,
-        nesting: 0,
-    }
-    .parse()
+    Parser::new(source, 0, 0).parse()
 }
 
-#[derive(Clone, Copy)]
 struct Parser<'a> {
     source: &'a str,
     pos: usize,
     nesting: usize,
+    documents: heredoc::Documents,
 }
 
+#[path = "heredoc.rs"]
+mod heredoc;
+pub(crate) use heredoc::parse_document_body;
 #[path = "completion.rs"]
 pub(crate) mod completion;
 #[path = "language_parser.rs"]
@@ -50,9 +48,18 @@ mod language;
 pub(crate) use language::parse_fragment;
 pub use language::{parse_script, valid_name};
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
+    fn new(source: &'a str, pos: usize, nesting: usize) -> Self {
+        Self {
+            source,
+            pos,
+            nesting,
+            documents: Default::default(),
+        }
+    }
+
     fn parse(mut self) -> Result<Option<Pipeline>, ParseError> {
-        self.skip_trivia();
+        self.skip_trivia()?;
         let start = self.pos;
         if self.peek().is_none() {
             return Ok(None);
@@ -77,7 +84,7 @@ impl Parser<'_> {
                 _ => PipeKind::Stdout,
             };
             let pipe_end = self.pos;
-            self.skip_trivia();
+            self.skip_trivia()?;
             if self.peek().is_none() {
                 return Err(self.error(
                     ParseErrorKind::MissingCommand,
@@ -89,7 +96,11 @@ impl Parser<'_> {
             commands.push(self.command()?);
         }
         let end = commands.last().unwrap().span.end;
-        self.skip_trivia();
+        self.skip_trivia()?;
+        self.documents.check_complete()?;
+        for command in &mut commands {
+            self.documents.attach(&mut command.redirections);
+        }
         if let Some(ch) = self.peek() {
             return Err(self.error(ParseErrorKind::MultipleCommands, self.pos, ch.len_utf8()));
         }
@@ -102,10 +113,20 @@ impl Parser<'_> {
 
     fn command(&mut self) -> Result<SimpleCommand, ParseError> {
         self.skip_spaces();
-        let start = self.pos;
+        self.finish_command(self.pos, None)
+    }
+
+    fn finish_command(
+        &mut self,
+        start: usize,
+        first: Option<Word>,
+    ) -> Result<SimpleCommand, ParseError> {
         let mut words = Vec::new();
         let mut redirections = Vec::new();
-        let mut end = start;
+        if let Some(word) = first {
+            self.command_word(word, &mut words, &mut redirections)?;
+        }
+        let mut end = self.pos;
 
         while let Some(ch) = self.peek() {
             match ch {
@@ -125,35 +146,7 @@ impl Parser<'_> {
                 }
                 _ => {
                     let word = self.word()?;
-                    let descriptor = match &word.parts[..] {
-                        [
-                            WordPart {
-                                kind: WordPartKind::Text(text),
-                                ..
-                            },
-                        ] if !text.is_empty()
-                            && text.bytes().all(|b| b.is_ascii_digit())
-                            && matches!(self.peek(), Some('<' | '>')) =>
-                        {
-                            Some(text.parse::<u8>().ok().filter(|fd| *fd <= 2).ok_or_else(
-                                || {
-                                    self.error(
-                                        ParseErrorKind::UnsupportedSyntax(
-                                            "descriptors other than 0, 1, and 2",
-                                        ),
-                                        word.span.start,
-                                        word.span.len(),
-                                    )
-                                },
-                            )?)
-                        }
-                        _ => None,
-                    };
-                    if let Some(descriptor) = descriptor {
-                        redirections.push(self.redirection(Some(descriptor), word.span.start)?);
-                    } else {
-                        words.push(word);
-                    }
+                    self.command_word(word, &mut words, &mut redirections)?;
                 }
             }
             if !matches!(ch, ' ' | '\t') {
@@ -173,6 +166,35 @@ impl Parser<'_> {
             redirections,
             span: start..end,
         })
+    }
+
+    fn command_word(
+        &mut self,
+        word: Word,
+        words: &mut Vec<Word>,
+        redirections: &mut Vec<Redirection>,
+    ) -> Result<(), ParseError> {
+        if let Some(text) = language::plain(&word)
+            && !text.is_empty()
+            && text.bytes().all(|b| b.is_ascii_digit())
+            && matches!(self.peek(), Some('<' | '>'))
+        {
+            let fd = text
+                .parse::<u8>()
+                .ok()
+                .filter(|fd| *fd <= 2)
+                .ok_or_else(|| {
+                    self.error(
+                        ParseErrorKind::UnsupportedSyntax("descriptors other than 0, 1, and 2"),
+                        word.span.start,
+                        word.span.len(),
+                    )
+                })?;
+            redirections.push(self.redirection(Some(fd), word.span.start)?);
+        } else {
+            words.push(word);
+        }
+        Ok(())
     }
 
     fn redirection(
@@ -201,11 +223,18 @@ impl Parser<'_> {
             ));
         }
         let target = self.word()?;
+        if matches!(
+            kind,
+            RedirectionKind::HereDocument | RedirectionKind::HereDocumentStripTabs
+        ) {
+            self.documents.queue(self.source, &target, kind, start);
+        }
         let end = target.span.end;
         Ok(Redirection {
             descriptor,
             kind,
             target,
+            here_document: None,
             span: start..end,
         })
     }
@@ -226,11 +255,21 @@ impl Parser<'_> {
             }
             '<' => match self.peek() {
                 Some('<') => {
-                    return Err(self.error(
-                        ParseErrorKind::UnsupportedSyntax("here-document or here-string"),
-                        start,
-                        self.pos + 1 - start,
-                    ));
+                    self.pos += 1;
+                    match self.peek() {
+                        Some('<') => {
+                            return Err(self.error(
+                                ParseErrorKind::UnsupportedSyntax("here-string"),
+                                start,
+                                self.pos + 1 - start,
+                            ));
+                        }
+                        Some('-') => {
+                            self.pos += 1;
+                            RedirectionKind::HereDocumentStripTabs
+                        }
+                        _ => RedirectionKind::HereDocument,
+                    }
                 }
                 Some('>') => {
                     self.pos += 1;
@@ -269,12 +308,7 @@ impl Parser<'_> {
     }
 
     fn following(&self) -> Option<char> {
-        Parser {
-            source: self.source,
-            pos: self.pos + 1,
-            nesting: self.nesting,
-        }
-        .peek()
+        Parser::new(self.source, self.pos + 1, self.nesting).peek()
     }
 
     fn word(&mut self) -> Result<Word, ParseError> {
@@ -374,6 +408,14 @@ impl Parser<'_> {
             let open = self.peek().unwrap();
             self.pos += 1;
             let arithmetic = open == '(' && self.peek() == Some('(');
+            if open == '(' && !arithmetic {
+                let value = self.substitution()?;
+                parts.push(WordPart {
+                    kind: WordPartKind::CommandSubstitution(value),
+                    span: start..self.pos,
+                });
+                return Ok(());
+            }
             if arithmetic {
                 self.pos += 1;
             }
@@ -419,18 +461,9 @@ impl Parser<'_> {
                             }
                             self.pos += 1;
                         }
-                        if open == '(' && !arithmetic {
-                            language::parse_nested(&value, self.nesting + 1).map_err(|mut e| {
-                                e.span.start += content;
-                                e.span.end += content;
-                                e
-                            })?;
-                        }
                         parts.push(WordPart {
                             kind: if arithmetic {
                                 WordPartKind::Arithmetic(value)
-                            } else if open == '(' {
-                                WordPartKind::CommandSubstitution(value)
                             } else {
                                 WordPartKind::Parameter(value)
                             },
@@ -489,10 +522,14 @@ impl Parser<'_> {
         self.source[self.pos..].chars().next()
     }
 
-    fn skip_trivia(&mut self) {
+    fn skip_trivia(&mut self) -> Result<(), ParseError> {
         while let Some(ch) = self.peek() {
             match ch {
-                ' ' | '\t' | '\n' => self.pos += 1,
+                ' ' | '\t' => self.pos += 1,
+                '\n' => {
+                    self.pos += 1;
+                    self.documents.collect(self.source, &mut self.pos)?;
+                }
                 '#' => {
                     let rest = &self.source[self.pos..];
                     self.pos += rest.find('\n').unwrap_or(rest.len());
@@ -500,6 +537,7 @@ impl Parser<'_> {
                 _ => break,
             }
         }
+        Ok(())
     }
 
     fn error(&self, kind: ParseErrorKind, start: usize, length: usize) -> ParseError {

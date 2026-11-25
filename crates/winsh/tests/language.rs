@@ -14,6 +14,99 @@ fn run(source: &str) -> Output {
 fn cases() -> Vec<(&'static str, &'static str, i32)> {
     vec![
         (
+            "IFS=; v=; set -- $v; echo \"$#\"; set -- \"$v\" a${v}b; echo \"$#:$2\"",
+            "0\n2:ab\n",
+            0,
+        ),
+        (
+            "case 'two words' in (one|'two words') echo yes;; *) echo wrong;; esac",
+            "yes\n",
+            0,
+        ),
+        (
+            "p='a*'; for x in abc 'a*' 'b/2' .x; do case $x in \"$p\") echo literal;; $p) echo variable;; [a-c]/?) echo bracket;; *) echo default;; esac; done",
+            "variable\nliteral\nbracket\ndefault\n",
+            0,
+        ),
+        (
+            "case a in a) echo one ;& ${unset:?skip}) echo two ;;& b) echo bad ;; a) echo three;; esac",
+            "one\ntwo\nthree\n",
+            0,
+        ),
+        (
+            "false; case x in esac; echo \"$?\"; case x in y) false;; esac; echo \"$?\"; case x in x) false;; esac",
+            "0\n0\n",
+            1,
+        ),
+        ("false; case a in a) ;; esac; echo \"$?\"", "0\n", 0),
+        (
+            "for x in 7 A z; do case $x in [[:digit:]]) echo digit;; [![:lower:]]) echo upper;; *) echo lower;; esac; done",
+            "digit\nupper\nlower\n",
+            0,
+        ),
+        (
+            "echo \"$(case yes in yes) case no in no) printf nested;; esac;; esac)\"",
+            "nested\n",
+            0,
+        ),
+        (
+            "x='two words'; cat <<EOF\n\"$x\" '${x}' $(printf sub) $((2+3)) *.rs ~\n\\$x \\\\ \\\" \\q\nEOF",
+            "\"two words\" 'two words' sub 5 *.rs ~\n$x \\ \\\" \\q\n",
+            0,
+        ),
+        (
+            "cat <<'E'ND | cat\n$HOME '$(never)' \\ literal\nEND\ncat <<\\END\n$HOME\nEND",
+            "$HOME '$(never)' \\ literal\n$HOME\n",
+            0,
+        ),
+        (
+            "cat <<-EOF\n\t\tfirst\n \tkeep\n\tEOF\ncat <<EOF\nE\\\nOF\necho after",
+            "first\n \tkeep\nafter\n",
+            0,
+        ),
+        (
+            "cat <<A <<B; cat <<C # collect in order\nfirst\nA\nsecond\nB\nthird\nC",
+            "second\nthird\n",
+            0,
+        ),
+        (
+            "f() { cat <<DOC\n$1\nDOC\n}; f first; f second; false && cat <<EOF\n${unset:?skipped}\nEOF\n:",
+            "first\nsecond\n",
+            0,
+        ),
+        (
+            "echo \"$(cat <<'EOF'\n) ' \" #\nEOF\n)\"; read -r value 2<<EOF 0<&2\nread value\nEOF\necho \"$value\"",
+            ") ' \" #\nread value\n",
+            0,
+        ),
+        ("cat <<EOF |\npayload\nEOF\ncat", "payload\n", 0),
+        ("cat <<''\n\nprintf done", "done", 0),
+        (
+            "for x in - m ']'; do case $x in [a'-'z]) echo dash;; [\\]]) echo bracket;; [!z]) echo other;; esac; done",
+            "dash\nother\nbracket\n",
+            0,
+        ),
+        (
+            "case a in a|${absent:?skipped}) false ;;& b) echo bad;; esac",
+            "",
+            1,
+        ),
+        (
+            "for x in a b; do case $x in a) continue ;& *) echo b;; esac; done",
+            "b\n",
+            0,
+        ),
+        (
+            "cat <<'END'\nbackslash\\\nEND\ncat <<EOF\nslash\\\\\nEOF",
+            "backslash\\\nslash\\\n",
+            0,
+        ),
+        (
+            "cat <<$marker\nliteral delimiter\n$marker",
+            "literal delimiter\n",
+            0,
+        ),
+        (
             "n=4; echo \"$(($n+2)):$((0 && 1/0)):$((1 || 1/0))\"",
             "6:0:1\n",
             0,
@@ -143,13 +236,25 @@ fn language_behaviors_have_explicit_results() {
 fn scripts_and_language_match_bash() {
     let bash = env::var_os("WINSH_TEST_BASH").expect("set WINSH_TEST_BASH");
     for (source, _, _) in cases() {
-        let expected = Command::new(&bash)
-            .args(["--noprofile", "--norc", "-c", source])
+        // Send script bytes through stdin: MSYS argv decoding can consume a
+        // backslash immediately before a newline in a native Windows argument.
+        let mut reference = Command::new(&bash)
+            .args(["--noprofile", "--norc", "-s"])
             .env_remove("BASH_ENV")
             .env_remove("ENV")
             .env("MSYS2_ARG_CONV_EXCL", "*")
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        reference
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(source.as_bytes())
+            .unwrap();
+        let expected = reference.wait_with_output().unwrap();
         let actual = run(source);
         assert_eq!(
             actual.status.code(),
@@ -178,6 +283,28 @@ fn command_string_arguments_follow_bash_zero_and_positional_conventions() {
 }
 
 #[test]
+fn script_file_accepts_crlf_here_documents_in_case_arms() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("choose.sh");
+    std::fs::write(
+        &path,
+        "\u{feff}case $1 in\r\nok) cat <<-END\r\n\tHello $2\r\n\tEND\r\n;;\r\nesac",
+    )
+    .unwrap();
+    let actual = Command::new(env!("CARGO_BIN_EXE_winsh"))
+        .arg(path)
+        .args(["ok", "世界"])
+        .output()
+        .unwrap();
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, "Hello 世界\n".as_bytes());
+}
+
+#[test]
 fn multiline_compound_commands_share_the_interactive_input_parser() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_winsh"))
         .stdin(Stdio::piped())
@@ -189,11 +316,11 @@ fn multiline_compound_commands_share_the_interactive_input_parser() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"f() {\nfor x in one two; do\necho \"$x\"\ndone\n}\nf\nexit 8\n")
+        .write_all(b"f() {\nfor x in one two; do\necho \"$x\"\ndone\n}\nf\ncase one in\none) cat <<-END\n\tinput\n\tEND\n;;\nesac\ncat <<''\n\nexit 8\n")
         .unwrap();
     let actual = child.wait_with_output().unwrap();
     assert_eq!(actual.status.code(), Some(8));
-    assert_eq!(actual.stdout, b"one\ntwo\n");
+    assert_eq!(actual.stdout, b"one\ntwo\ninput\n");
     assert!(actual.stderr.is_empty(), "{:?}", actual.stderr);
 }
 
@@ -225,7 +352,7 @@ fn syntax_tree_keeps_nested_compounds_and_incomplete_input() {
         "if; then :; fi",
         "echo x & &",
         "echo x ;;",
-        "echo x; case y in",
+        "case x in a||b) echo bad;; esac",
         "for x do echo x; done",
         "items[0]=value",
     ] {

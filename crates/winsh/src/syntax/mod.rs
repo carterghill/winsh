@@ -8,9 +8,9 @@ use std::{fmt, ops::Range};
 mod parser;
 
 pub(crate) use parser::completion::{Target, completion_word};
-pub(crate) use parser::parse_fragment;
 pub use parser::parse_script;
 pub use parser::valid_name;
+pub(crate) use parser::{parse_document_body, parse_fragment};
 pub use parser::{parse_pipeline, parse_simple_command};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
@@ -68,6 +68,10 @@ pub enum CommandKind {
         branches: Vec<(Script, Script)>,
         otherwise: Option<Script>,
     },
+    Case {
+        word: Word,
+        arms: Vec<CaseArm>,
+    },
     For {
         name: String,
         words: Option<Vec<Word>>,
@@ -82,6 +86,20 @@ pub enum CommandKind {
         name: String,
         body: Box<Command>,
     },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CaseArm {
+    pub patterns: Vec<Word>,
+    pub body: Script,
+    pub terminator: CaseTerminator,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseTerminator {
+    Break,
+    FallThrough,
+    Retest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,12 +132,21 @@ pub struct Redirection {
     pub descriptor: Option<u8>,
     pub kind: RedirectionKind,
     pub target: Word,
+    pub here_document: Option<HereDocument>,
     pub span: Range<usize>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct HereDocument {
+    pub body: String,
+    pub quoted: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectionKind {
     Input,
+    HereDocument,
+    HereDocumentStripTabs,
     Output,
     Append,
     ReadWrite,
@@ -182,6 +209,7 @@ pub enum ParseErrorKind {
     MultipleCommands,
     MissingCommand,
     MissingRedirectionTarget,
+    UnclosedHereDocument(String),
     NullByte,
     Expected(&'static str),
     Unexpected(&'static str),
@@ -194,6 +222,7 @@ impl ParseError {
             self.kind,
             ParseErrorKind::UnclosedQuote(_)
                 | ParseErrorKind::TrailingEscape
+                | ParseErrorKind::UnclosedHereDocument(_)
                 | ParseErrorKind::MissingCommand
                 | ParseErrorKind::Expected(_)
         )
@@ -212,6 +241,9 @@ impl fmt::Display for ParseError {
             ParseErrorKind::MultipleCommands => write!(f, "expected only one foreground pipeline"),
             ParseErrorKind::MissingCommand => write!(f, "expected a command after pipe"),
             ParseErrorKind::MissingRedirectionTarget => write!(f, "expected a redirection target"),
+            ParseErrorKind::UnclosedHereDocument(ref delimiter) => {
+                write!(f, "expected here-document delimiter {delimiter:?}")
+            }
             ParseErrorKind::NullByte => write!(f, "shell input cannot contain a NUL byte"),
             ParseErrorKind::Expected(token) => write!(f, "expected {token}"),
             ParseErrorKind::Unexpected(token) => write!(f, "unexpected {token}"),

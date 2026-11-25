@@ -3,40 +3,85 @@ use std::{
     path::{Path, PathBuf},
 };
 pub(crate) fn matches(pattern: &str, value: &str) -> bool {
-    fn inner(p: &[char], s: &[char]) -> bool {
-        match p.first() {
-            None => s.is_empty(),
-            Some('*') => inner(&p[1..], s) || (!s.is_empty() && inner(p, &s[1..])),
-            Some('?') => !s.is_empty() && inner(&p[1..], &s[1..]),
-            Some('\\') if p.len() > 1 => s.first() == p.get(1) && inner(&p[2..], &s[1..]),
-            Some('[') => {
-                let mut i = 1;
-                let negate = matches!(p.get(i), Some('!' | '^'));
-                if negate {
-                    i += 1;
-                }
-                let mut yes = false;
-                while i < p.len() && (p[i] != ']' || i == 1 + usize::from(negate)) {
-                    if i + 2 < p.len() && p[i + 1] == '-' && p[i + 2] != ']' {
-                        yes |= s.first().is_some_and(|c| *c >= p[i] && *c <= p[i + 2]);
-                        i += 3;
-                    } else {
-                        yes |= s.first() == p.get(i);
-                        i += 1;
-                    }
-                }
-                if i == p.len() {
-                    return s.first() == Some(&'[') && inner(&p[1..], &s[1..]);
-                }
-                !s.is_empty() && yes != negate && inner(&p[i + 1..], &s[1..])
-            }
-            Some(ch) => s.first() == Some(ch) && inner(&p[1..], &s[1..]),
+    let pattern: Vec<_> = pattern.chars().collect();
+    let value: Vec<_> = value.chars().collect();
+    let (mut p, mut v) = (0, 0);
+    // A case subject can be much longer than a filename. Retry the last star
+    // with one more character without consuming a stack frame per character.
+    let mut star = None;
+    while v < value.len() {
+        if pattern.get(p) == Some(&'*') {
+            p += 1;
+            star = Some((p, v));
+            continue;
+        }
+        let (matched, width) = match pattern.get(p) {
+            Some('?') => (true, 1),
+            Some('[') => bracket(&pattern[p..], value[v]).unwrap_or((value[v] == '[', 1)),
+            Some('\\') if p + 1 < pattern.len() => (value[v] == pattern[p + 1], 2),
+            literal => (literal == Some(&value[v]), 1),
+        };
+        if matched {
+            p += width;
+            v += 1;
+        } else if let Some((resume, consumed)) = &mut star {
+            *consumed += 1;
+            v = *consumed;
+            p = *resume;
+        } else {
+            return false;
         }
     }
-    inner(
-        &pattern.chars().collect::<Vec<_>>(),
-        &value.chars().collect::<Vec<_>>(),
-    )
+    pattern[p..].iter().all(|ch| *ch == '*')
+}
+
+fn bracket(pattern: &[char], value: char) -> Option<(bool, usize)> {
+    fn member(pattern: &[char], i: &mut usize) -> Option<char> {
+        if pattern.get(*i) == Some(&'\\') {
+            *i += 1;
+        }
+        let ch = *pattern.get(*i)?;
+        *i += 1;
+        Some(ch)
+    }
+    let negate = matches!(pattern.get(1), Some('!' | '^'));
+    let mut i = 1 + usize::from(negate);
+    let mut matched = false;
+    loop {
+        if pattern[i..].starts_with(&['[', ':']) {
+            let name = &pattern[i + 2..];
+            let end = name.windows(2).position(|pair| pair == [':', ']'])?;
+            let name: String = name[..end].iter().collect();
+            matched |= match name.as_str() {
+                "alnum" => value.is_ascii_alphanumeric(),
+                "alpha" => value.is_ascii_alphabetic(),
+                "blank" => matches!(value, ' ' | '\t'),
+                "cntrl" => value.is_ascii_control(),
+                "digit" => value.is_ascii_digit(),
+                "graph" => value.is_ascii_graphic(),
+                "lower" => value.is_ascii_lowercase(),
+                "print" => value == ' ' || value.is_ascii_graphic(),
+                "punct" => value.is_ascii_punctuation(),
+                "space" => value.is_ascii_whitespace() || value == '\x0b',
+                "upper" => value.is_ascii_uppercase(),
+                "xdigit" => value.is_ascii_hexdigit(),
+                _ => return None,
+            };
+            i += end + 4;
+        } else {
+            let first = member(pattern, &mut i)?;
+            if pattern.get(i) == Some(&'-') && pattern.get(i + 1) != Some(&']') {
+                i += 1;
+                let last = member(pattern, &mut i)?;
+                matched |= (first..=last).contains(&value);
+            } else {
+                matched |= value == first;
+            }
+        }
+        if pattern.get(i) == Some(&']') {
+            return Some((matched != negate, i + 1));
+        }
+    }
 }
 pub(crate) fn paths(cwd: &Path, pattern: &str) -> Vec<OsString> {
     let mut candidates = vec![PathBuf::new()];

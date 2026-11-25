@@ -11,11 +11,7 @@ pub(crate) enum Target {
 /// Use the shell word parser so quotes, escapes and substitutions consume
 /// exactly the same source as they would during execution.
 pub(crate) fn completion_word(source: &str) -> Option<(Target, Word, Option<Quote>)> {
-    let mut parser = Parser {
-        source,
-        pos: 0,
-        nesting: 0,
-    };
+    let mut parser = Parser::new(source, 0, 0);
     let mut target = Target::Command;
     let mut redirect = None;
     loop {
@@ -56,7 +52,10 @@ pub(crate) fn completion_word(source: &str) -> Option<(Target, Word, Option<Quot
                 if quote.is_some() || parser.pos == source.len() {
                     let target = match redirect {
                         Some(
-                            RedirectionKind::DuplicateInput | RedirectionKind::DuplicateOutput,
+                            RedirectionKind::DuplicateInput
+                            | RedirectionKind::DuplicateOutput
+                            | RedirectionKind::HereDocument
+                            | RedirectionKind::HereDocumentStripTabs,
                         ) => return None,
                         Some(_) => Target::Path,
                         None => target,

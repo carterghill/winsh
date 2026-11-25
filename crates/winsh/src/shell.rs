@@ -287,21 +287,13 @@ impl Shell {
         let result = if let CommandKind::Simple(simple) = &command.kind {
             self.simple(simple, &mut streams, pipe_stderr)
         } else {
-            match self.redirects(&command.redirections, &mut streams) {
-                Ok(redirects) => {
-                    if !redirect::apply(self, &redirects, &mut streams)? {
-                        Ok(Outcome::Continue(1))
-                    } else {
-                        if pipe_stderr {
-                            streams.duplicate(2, 1)?;
-                        }
-                        self.compound(&command.kind, &mut streams)
+            match redirect::apply(self, &command.redirections, &mut streams)? {
+                Some(failure) => Ok(failure),
+                None => {
+                    if pipe_stderr {
+                        streams.duplicate(2, 1)?;
                     }
-                }
-                Err(error) => {
-                    self.abort_script = true;
-                    streams.err(format_args!("winsh: {error}\n"))?;
-                    Ok(Outcome::Continue(2))
+                    self.compound(&command.kind, &mut streams)
                 }
             }
         };
@@ -319,25 +311,14 @@ impl Shell {
             Err(error) => Err(error),
         }
     }
-    fn redirects(
+    pub(crate) fn expansion_failure(
         &mut self,
-        redirections: &[syntax::Redirection],
+        error: expand::ExpansionError,
         io: &mut ShellIo,
-    ) -> Result<Vec<redirect::Redirect>, expand::ExpansionError> {
-        redirections
-            .iter()
-            .map(|r| {
-                let fields = expand::fields(&r.target, self, io, true)?;
-                if fields.len() != 1 {
-                    return Err(expand::error(&r.target, "ambiguous redirect"));
-                }
-                Ok(redirect::Redirect {
-                    descriptor: r.descriptor,
-                    kind: r.kind,
-                    target: fields.into_iter().next().unwrap(),
-                })
-            })
-            .collect()
+    ) -> io::Result<Outcome> {
+        self.abort_script = true;
+        io.err(format_args!("winsh: {error}\n"))?;
+        Ok(Outcome::Continue(2))
     }
     fn simple(
         &mut self,
@@ -370,19 +351,14 @@ impl Shell {
                     arguments.extend(expand::fields(word, self, io, true)?);
                 }
             }
-            let redirects = self.redirects(&simple.redirections, io)?;
-            Ok::<_, expand::ExpansionError>((arguments, redirects))
+            Ok::<_, expand::ExpansionError>(arguments)
         })();
-        let (arguments, redirects) = match prepared {
+        let arguments = match prepared {
             Ok(p) => p,
-            Err(error) => {
-                self.abort_script = true;
-                io.err(format_args!("winsh: {error}\n"))?;
-                return Ok(Outcome::Continue(2));
-            }
+            Err(error) => return self.expansion_failure(error, io),
         };
-        if !redirect::apply(self, &redirects, io)? {
-            return Ok(Outcome::Continue(1));
+        if let Some(failure) = redirect::apply(self, &simple.redirections, io)? {
+            return Ok(failure);
         }
         if pipe_stderr {
             io.duplicate(2, 1)?;
@@ -506,6 +482,47 @@ impl Shell {
                     Some(body) => self.execute_script(body, io),
                     None => Ok(Outcome::Continue(0)),
                 }
+            }
+            CommandKind::Case { word, arms } => {
+                let value = match expand::scalar(word, self, io) {
+                    Ok(value) => value,
+                    Err(error) => return self.expansion_failure(error, io),
+                };
+                let value = value.to_string_lossy();
+                let mut outcome = Outcome::Continue(0);
+                let mut fall_through = false;
+                for arm in arms {
+                    if !fall_through {
+                        let mut matched = false;
+                        for pattern in &arm.patterns {
+                            let pattern = match expand::case_pattern(pattern, self, io) {
+                                Ok(pattern) => pattern,
+                                Err(error) => return self.expansion_failure(error, io),
+                            };
+                            if crate::glob::matches(&pattern, &value) {
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if !matched {
+                            continue;
+                        }
+                    }
+                    outcome = if arm.body.lists.is_empty() {
+                        Outcome::Continue(0)
+                    } else {
+                        self.execute_script(&arm.body, io)?
+                    };
+                    if matches!(outcome, Outcome::Exit(_))
+                        || self.flow.is_some()
+                        || self.abort_script
+                        || arm.terminator == syntax::CaseTerminator::Break
+                    {
+                        break;
+                    }
+                    fall_through = arm.terminator == syntax::CaseTerminator::FallThrough;
+                }
+                Ok(outcome)
             }
             CommandKind::For { name, words, body } => {
                 let values = if let Some(words) = words {

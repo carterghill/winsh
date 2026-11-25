@@ -14,12 +14,13 @@ Script
         SimpleCommand        words and ordered redirections
         Group                { list; } or (list)
         If                   condition/body pairs and optional else
+        Case                 subject, pattern alternatives, bodies, and terminators
         For / While          loop words/conditions and body
         Function             name and deferred compound body
 ~~~
 
 The parser recognizes `if`/`elif`/`else`/`fi`, `for`/`in`/`do`/`done`,
-`while`/`until`, groups, and `name() { ...; }` in command position. Quoted words
+`while`/`until`, `case`/`in`/`esac`, groups, and `name() { ...; }` in command position. Quoted words
 with reserved-word spelling remain ordinary words. The evaluator identifies
 assignment prefixes from unquoted leading `name=` text; the parser retains them
 as words. Compound commands may have trailing redirections and appear in pipelines.
@@ -66,7 +67,10 @@ groups stay structural, including empty groups.
 
 Redirections retain source order, optional descriptor, operator kind, target
 word, and complete source span. Supported operators are `<`, `>`, `>>`, `<>`,
-`>|`, `<&`, `>&`, `&>`, and `&>>`, limited to descriptors 0, 1, and 2. The engine
+`>|`, `<&`, `>&`, `&>`, `&>>`, `<<`, and `<<-`, limited to descriptors 0, 1, and 2. A
+here-document redirect retains its delimiter word, collected body, and whether
+the delimiter was quoted. A missing closing delimiter requests more input at
+the prompt and gives status 2 at end of input. The engine
 interprets descriptor duplication/moves/closing after expansion.
 
 These rules follow the Bash references for
@@ -88,7 +92,7 @@ A single `&` terminates an asynchronous AND/OR list, including its pipelines.
 The next command can begin on the same line. Quoting or escaping `&` keeps it
 in a word. The operators `&&`, `|&`, `&>`, and `>&` keep their usual meanings.
 
-Here-documents/strings, process substitution, `case`, `select`,
+Here-strings, process substitution, `select`,
 `[[ ... ]]`, `function` spelling, arrays, brace expansion, backticks, ANSI-C
 quoting, and descriptors above 2 are outside the current grammar. Unsupported
 features report errors where recognized; this remains a Bash subset.

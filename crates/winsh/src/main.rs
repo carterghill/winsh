@@ -191,9 +191,16 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
             }
         }
         pending.push_str(&line);
+        // An actual blank line can close a here-document with an empty delimiter.
+        let blank_line = newline && line.is_empty();
+        if blank_line {
+            pending.push('\n');
+        }
         let parsed = parse_script(&pending);
         if matches!(&parsed, Err(error) if error.is_incomplete() && newline) {
-            pending.push('\n');
+            if !blank_line {
+                pending.push('\n');
+            }
             continue;
         }
         // Save before execution so a terminal restart during a command keeps it.

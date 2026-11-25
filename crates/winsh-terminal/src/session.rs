@@ -31,11 +31,12 @@ use windows_sys::Win32::{
         },
         Pipes::CreatePipe,
         Threading::{
-            CREATE_SUSPENDED, CreateProcessW, DeleteProcThreadAttributeList,
-            EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
-            LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-            ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-            UpdateProcThreadAttribute, WaitForSingleObject,
+            CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+            DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+            InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, ResumeThread,
+            STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+            WaitForSingleObject,
         },
     },
 };
@@ -227,6 +228,7 @@ impl Resources {
         let program = program.canonicalize()?;
         let application = wide(program.as_os_str())?;
         let mut command = command_line(program.as_os_str(), arguments)?;
+        let environment = terminal_environment();
         let (input_read, input_write) = pipe()?;
         let (output_read, output_write) = pipe()?;
         let mut handle = 0;
@@ -271,8 +273,8 @@ impl Resources {
                 ptr::null(),
                 ptr::null(),
                 0,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
-                ptr::null(),
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                environment.as_ptr().cast(),
                 ptr::null(),
                 &startup.StartupInfo,
                 &mut information,
@@ -416,6 +418,25 @@ fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
     }
     result.push(0);
     Ok(result)
+}
+
+// The child runs in our VT terminal even if the launcher inherited TERM=dumb.
+// CreateProcessW expects sorted, NUL-terminated name=value pairs and a final NUL.
+fn terminal_environment() -> Vec<u16> {
+    let mut vars: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("TERM"))
+        .collect();
+    vars.push(("TERM".into(), "vt100".into()));
+    vars.sort_by_cached_key(|(name, _)| name.to_string_lossy().to_uppercase());
+    let mut block = Vec::new();
+    for (name, value) in vars {
+        block.extend(name.encode_wide());
+        block.push(b'=' as u16);
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    block
 }
 
 // Windows CRT quoting: double backslashes before a quote or closing delimiter.

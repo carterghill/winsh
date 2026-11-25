@@ -8,6 +8,7 @@ description = "A native Windows shell with Bash-compatible syntax."
 
 [dependencies]
 regex = "1"
+rustyline = { version = "17", default-features = false, features = ["with-file-history", "custom-bindings"] }
 same-file = "1"
 
 [target.'cfg(windows)'.dependencies]

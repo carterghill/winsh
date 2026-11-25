@@ -87,7 +87,7 @@ docs/                      Shared architecture and compatibility notes
 
 The terminal package owns the window, rendering, terminal screen state, input
 events, resizing, and ConPTY session lifecycle. The shell owns parsing,
-expansion, navigation, command execution, and eventually editing and history.
+expansion, navigation, command execution, line editing, and history.
 
 ~~~text
 Keyboard input -> terminal -> ConPTY -> winsh.exe -> native child
@@ -152,8 +152,9 @@ no shell framework, async runtime, or GUI toolkit dependency.
 6. **Implemented subset:** bundled ls, cat, and grep support directory listings,
    file input, redirections, and pipelines. Script tests cover concatenation and log
    filtering. See [file utilities](shell.md#file-utilities) for options and statuses.
-7. Improve editing, history, completion, and job control as separate shell
-   features. Basic input currently uses the host console's line editing.
+7. **Implemented subset:** interactive line editing and persistent command history.
+   Path and command completion, background jobs, and job control are still open.
+   See [interactive history](shell.md#interactive-history).
 
 Test behavior at the lowest useful level: pure parser tests, engine tests with
 explicit state and I/O, and Windows integration tests for processes and

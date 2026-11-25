@@ -27,7 +27,8 @@ cargo build --workspace --release
 
 Keep `winsh-terminal.exe` and `winsh.exe` together. The launcher resolves the
 default shell beside its own executable, independently of the working directory.
-The shell inherits the launcher's working directory and environment.
+The shell inherits the launcher's working directory and environment, with
+`TERM=vt100` identifying the dedicated terminal to interactive programs.
 
 ## Automatic rebuilds
 
@@ -95,8 +96,9 @@ Font fallback and complex emoji shaping are limited by GDI. Width changes
 truncate or extend existing rows rather than reflowing old text. Scrollback
 has no scrollbar. This is a basic VT terminal, not full xterm compatibility.
 
-The hosted program owns command-line editing. History, completion, background
-jobs, and job control remain separate shell milestones. Pipelines and redirections
+The hosted program owns command-line editing. Winsh supports persistent history
+in this window. Completion, background jobs, and job control remain on the shell
+roadmap. Pipelines and redirections
 are implemented by winsh and work inside this window; see [the shell guide](shell.md#redirections-and-pipelines).
 The terminal itself adds no language rules or script-file support.
 
@@ -114,13 +116,13 @@ resizing as observed by a console child, startup failure, and descendant cleanup
 Two ignored test entries are subprocess fixtures used by those integration
 tests, not additional manual checks.
 
-An additional opt-in integration test exercises the real winsh executable,
-including cancelling multiline input, interrupting foreground programs and a
-native pipeline, continuing afterward, and preserving the shell's exit status:
+The opt-in shell tests cover persistent command recall across terminal restarts,
+canceling multiline input, interrupting foreground programs and a native
+pipeline, and preserving the shell's exit status.
 
 ~~~powershell
 cargo build --workspace
-cargo test -p winsh-terminal --test conpty winsh_interactive_smoke -- --ignored --exact
+cargo test -p winsh-terminal --test conpty winsh_ -- --ignored
 ~~~
 
 Use the same `--target-dir` for both commands if you override Cargo's output

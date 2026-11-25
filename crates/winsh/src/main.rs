@@ -7,6 +7,7 @@ use std::{
 use winsh::{Outcome, Shell, ShellIo, Utility, syntax::parse_script};
 
 mod console;
+mod interactive;
 
 const HELP: &str = "A native Windows shell with Bash-compatible syntax.
 
@@ -149,36 +150,17 @@ fn run() -> io::Result<i32> {
 }
 
 fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io::Result<i32> {
-    let mut redirected = if interactive {
-        None
-    } else {
-        Some(console::redirected_stdin()?)
-    };
+    let mut input = interactive::Input::new(interactive)?;
     let mut pending = String::new();
     loop {
-        if interactive {
-            if pending.is_empty() {
-                write!(io::stderr(), "{} $ ", shell.cwd().display())?;
-            } else {
-                write!(io::stderr(), "> ")?;
-            }
-            io::stderr().flush()?;
-        }
         let mut line = String::new();
-        let read = match &mut redirected {
-            Some(input) => console::read_line_unbuffered(input, &mut line),
-            None => console::read_line(&mut line),
-        };
+        let read = input.read_line(shell.cwd(), !pending.is_empty(), &mut line);
         if matches!(&read, Err(error) if error.kind() == io::ErrorKind::Interrupted) {
             pending.clear();
             shell.interrupt();
-            writeln!(io::stderr())?;
             continue;
         }
         if read? == 0 {
-            if interactive {
-                writeln!(io::stderr())?;
-            }
             return if pending.is_empty() {
                 Ok(shell.last_status())
             } else {
@@ -193,11 +175,14 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
             }
         }
         pending.push_str(&line);
-        match parse_script(&pending) {
-            Err(error) if error.is_incomplete() && newline => {
-                pending.push('\n');
-                continue;
-            }
+        let parsed = parse_script(&pending);
+        if matches!(&parsed, Err(error) if error.is_incomplete() && newline) {
+            pending.push('\n');
+            continue;
+        }
+        // Save before execution so a terminal restart during a command keeps it.
+        input.remember(&pending);
+        match parsed {
             Ok(script) => {
                 let outcome = shell.execute_script(&script, streams)?;
                 if let Outcome::Exit(status) = outcome {

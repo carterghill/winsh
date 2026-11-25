@@ -46,6 +46,22 @@ The input loop accepts UTF-8 redirected source and normalizes CRLF to LF.
 Interactive Windows input is decoded from the console's UTF-16. Command strings
 passed through `-c` are preserved as supplied.
 
+## Interactive history
+
+At the prompt, press ↑ to recall a command, edit it, and press Enter to run it.
+Press ↓ to move forward through history and return to the line you were typing.
+Multiline commands are stored as single entries. Winsh skips blank commands,
+consecutive duplicates, and input canceled with Ctrl+C.
+
+Winsh saves each submitted command before running it, so closing the terminal
+or restarting it with `dev.cmd` keeps the last command. New sessions load up to
+1,000 entries from `%LOCALAPPDATA%\winsh\history` on Windows. Set
+`WINSH_HISTORY_FILE` in the launching environment to use a different file.
+An empty value keeps history in memory for that session. Scripts, `-c`, and
+piped input do not add entries. Winsh uses basic console input when output is
+redirected or the terminal advertises limited editing support (such as `TERM=dumb`).
+History navigation requires the interactive editor.
+
 ## Built-ins and paths
 
 | Command | Current behavior |
@@ -317,7 +333,7 @@ descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is 
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.
 
-There is no arbitrary shebang dispatch, CDPATH lookup, history,
+There is no arbitrary shebang dispatch, CDPATH lookup,
 completion, configurable prompt, or background jobs yet.
 Windows Ctrl+C support covers foreground execution; Unix signal
 and job-control integration is deferred.

@@ -60,6 +60,28 @@ impl Harness {
         self.terminal.lock().unwrap().screen().contents()
     }
 
+    fn shell(history: &Path) -> Self {
+        let shell = Path::new(env!("CARGO_BIN_EXE_winsh-terminal")).with_file_name("winsh.exe");
+        assert!(
+            shell.is_file(),
+            "build the workspace first: {}",
+            shell.display()
+        );
+        // Set history only in this child, using native arguments for both paths.
+        let args = [
+            OsString::from("-c"),
+            OsString::from(r#"WINSH_HISTORY_FILE="$1" "$2""#),
+            OsString::from("test"),
+            history.into(),
+            shell.clone().into(),
+        ];
+        let terminal = Arc::new(Mutex::new(Terminal::new(40, 160)));
+        let session = Session::spawn(&shell, &args, 40, 160, Arc::clone(&terminal)).unwrap();
+        let harness = Self { session, terminal };
+        wait_for_prompt(&harness);
+        harness
+    }
+
     fn enter(&self, command: &str) {
         self.session
             .write(format!("{command}\r").into_bytes())
@@ -92,11 +114,15 @@ impl Harness {
 
     fn finish(&self) {
         self.session.write(b"quit\r".to_vec()).unwrap();
+        self.wait_for_exit(0);
+    }
+
+    fn wait_for_exit(&self, expected: i32) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match self.session.try_event() {
                 Some(Event::Exited(status)) => {
-                    assert_eq!(status, 0);
+                    assert_eq!(status, expected);
                     return;
                 }
                 Some(Event::Error(error)) => panic!("{error}"),
@@ -179,16 +205,7 @@ fn failed_process_start_returns_an_error_without_hanging() {
 #[test]
 #[ignore = "requires cargo build --workspace in the same target directory"]
 fn winsh_interactive_smoke() {
-    let shell = Path::new(env!("CARGO_BIN_EXE_winsh-terminal")).with_file_name("winsh.exe");
-    assert!(
-        shell.is_file(),
-        "build the workspace first: {}",
-        shell.display()
-    );
-    let terminal = Arc::new(Mutex::new(Terminal::new(40, 160)));
-    let session = Session::spawn(&shell, &[], 40, 160, Arc::clone(&terminal)).unwrap();
-    let harness = Harness { session, terminal };
-    wait_for_prompt(&harness);
+    let harness = Harness::shell(Path::new(""));
 
     // Cancel an unfinished quoted command, then run a native foreground child.
     harness.enter("pwd 'unfinished");
@@ -241,19 +258,60 @@ fn winsh_interactive_smoke() {
     harness.enter(r#"printf 'utility-status-%s\n' "$?""#);
     harness.wait_for("utility-status-130");
     harness.enter("exit 42");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match harness.session.try_event() {
-            Some(Event::Exited(status)) => {
-                assert_eq!(status, 42);
-                break;
-            }
-            Some(Event::Error(error)) => panic!("{error}"),
-            _ => {}
-        }
-        assert!(Instant::now() < deadline, "shell did not exit");
-        thread::sleep(Duration::from_millis(10));
-    }
+    harness.wait_for_exit(42);
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_history_survives_restarts() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::path::absolute(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap()
+        .join(format!("history-{}-{nonce}", std::process::id()));
+    let first = Harness::shell(&path);
+    let second = Harness::shell(&path);
+    first.enter("echo 'from");
+    first.wait_for("\n>");
+    first.enter("first'");
+    first.wait_for("\nfrom\nfirst");
+    second.enter("echo saved");
+    second.wait_for("\nsaved");
+    second.enter("echo 'discarded");
+    second.wait_for("\n>");
+    second.session.write(vec![3]).unwrap();
+    wait_for_prompt(&second);
+    // Closing the window can kill winsh without giving it a graceful exit.
+    drop(first);
+    drop(second);
+
+    let fresh = Harness::shell(&path);
+    fresh.session.write(b"echo draft\x1b[A".to_vec()).unwrap();
+    fresh.wait_for("$ echo saved");
+    fresh.session.write(b"\x1b[B".to_vec()).unwrap();
+    fresh.wait_for("$ echo draft");
+    fresh.session.write(b"\x1b[A again\r".to_vec()).unwrap();
+    fresh.wait_for("\nsaved again");
+    // Recall the original multiline entry and execute it in the new shell.
+    fresh
+        .session
+        .write(b"\x1b[A\x1b[A\x1b[A\r".to_vec())
+        .unwrap();
+    fresh.wait_for("\nfrom\nfirst");
+    fresh
+        .session
+        .write(b"echo eof-buffer\x1a".to_vec())
+        .unwrap();
+    fresh.wait_for("\neof-buffer");
+    wait_for_prompt(&fresh);
+    fresh.session.write(vec![26]).unwrap();
+    fresh.wait_for_exit(0);
+    drop(fresh);
+    let history = std::fs::read_to_string(&path).unwrap();
+    assert!(!history.contains("discarded"));
+    std::fs::remove_file(path).unwrap();
 }
 
 fn wait_for_prompt(harness: &Harness) {

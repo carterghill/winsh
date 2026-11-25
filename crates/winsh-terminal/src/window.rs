@@ -39,6 +39,9 @@ use crate::{
     terminal::Terminal,
 };
 
+mod fonts;
+use fonts::{Fonts, Symbols};
+
 const PADDING: i32 = 12;
 const CF_UNICODETEXT: u32 = 13;
 const DEFAULT_FOREGROUND: u32 = rgb(220, 224, 232);
@@ -52,10 +55,12 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     // SAFETY: GetDpiForSystem has no preconditions.
     let dpi = unsafe { GetDpiForSystem() }.max(96);
     let terminal = Arc::new(Mutex::new(Terminal::new(30, 100)));
+    let symbols = Symbols::load()?;
     let mut state = Box::new(State {
         terminal: Arc::clone(&terminal),
         session: None,
         fonts: Fonts::new(dpi)?,
+        symbols,
         text: TextInput::default(),
         focused: false,
         cursor_visible: true,
@@ -177,6 +182,7 @@ struct State {
     terminal: Arc<Mutex<Terminal>>,
     session: Option<Session>,
     fonts: Fonts,
+    symbols: Symbols,
     text: TextInput,
     focused: bool,
     cursor_visible: bool,
@@ -329,7 +335,7 @@ impl State {
                 return;
             }
             let previous_bitmap = SelectObject(memory, bitmap);
-            let previous_font = SelectObject(memory, self.fonts.handles[0]);
+            let previous_font = SelectObject(memory, self.fonts.text(0));
             let background = CreateSolidBrush(DEFAULT_BACKGROUND);
             FillRect(memory, &client, background);
             DeleteObject(background);
@@ -338,43 +344,78 @@ impl State {
             let screen = terminal.screen();
             let (rows, columns) = screen.size();
             for row in 0..rows {
-                for column in 0..columns {
+                let mut cells = 0..columns;
+                while let Some(column) = cells.next() {
                     let Some(cell) = screen.cell(row, column) else {
                         continue;
                     };
                     if cell.is_wide_continuation() {
                         continue;
                     }
+                    let (foreground, background) = cell_colors(cell);
+                    let contents = cell.contents();
+                    let symbol = self.symbols.glyph(contents);
+                    let mut wide = cell.is_wide();
+                    if symbol.is_some()
+                        && !wide
+                        && can_share_symbol_space(screen.cell(row, column + 1), background)
+                    {
+                        // Paint the blank's background together with the icon so it
+                        // cannot erase the right edge on the next iteration.
+                        cells.next();
+                        wide = true;
+                    }
                     let x = PADDING + i32::from(column) * self.fonts.width;
                     let y = PADDING + i32::from(row) * self.fonts.height;
-                    let width = self.fonts.width * if cell.is_wide() { 2 } else { 1 };
+                    let width = self.fonts.width * if wide { 2 } else { 1 };
                     let rect = RECT {
                         left: x,
                         top: y,
                         right: x + width,
                         bottom: y + self.fonts.height,
                     };
-                    let mut foreground = color(cell.fgcolor(), DEFAULT_FOREGROUND);
-                    let mut background = color(cell.bgcolor(), DEFAULT_BACKGROUND);
-                    if cell.inverse() {
-                        std::mem::swap(&mut foreground, &mut background);
-                    }
                     SetTextColor(memory, foreground);
                     SetBkColor(memory, background);
                     let index = usize::from(cell.bold())
                         + 2 * usize::from(cell.italic())
                         + 4 * usize::from(cell.underline());
-                    SelectObject(memory, self.fonts.handles[index]);
-                    let text: Vec<u16> = if cell.has_contents() {
-                        OsStr::new(cell.contents()).encode_wide().collect()
+                    // Draw the actual glyph index. GDI's UTF-16 fallback can
+                    // split supplementary-plane icons such as the Downloads folder.
+                    let units;
+                    let (font, text, flags, dx, dy) = if let Some(ref glyph) = symbol {
+                        let size = self.fonts.symbol(wide);
+                        // In a padded icon field, align its advance to the end of
+                        // the field. The following space is the visible name gap.
+                        let dx = if wide
+                            && can_share_symbol_space(
+                                screen.cell(row, column.saturating_add(2)),
+                                background,
+                            ) {
+                            (width - size.advance).max(0)
+                        } else {
+                            0
+                        };
+                        (
+                            size.handle(),
+                            std::slice::from_ref(glyph),
+                            ETO_GLYPH_INDEX,
+                            dx,
+                            size.y(*glyph),
+                        )
                     } else {
-                        vec![32]
+                        units = if contents.is_empty() {
+                            vec![32]
+                        } else {
+                            OsStr::new(contents).encode_wide().collect()
+                        };
+                        (self.fonts.text(index), units.as_slice(), 0, 0, 0)
                     };
+                    SelectObject(memory, font);
                     ExtTextOutW(
                         memory,
-                        x,
-                        y,
-                        ETO_OPAQUE | ETO_CLIPPED,
+                        x + dx,
+                        y + dy,
+                        ETO_OPAQUE | ETO_CLIPPED | flags,
                         &rect,
                         text.as_ptr(),
                         text.len() as u32,
@@ -541,81 +582,6 @@ unsafe extern "system" fn window_proc(
     }
 }
 
-struct Fonts {
-    handles: Vec<HFONT>,
-    width: i32,
-    height: i32,
-    cursor_y: std::ops::Range<i32>,
-}
-
-impl Fonts {
-    fn new(dpi: u32) -> io::Result<Self> {
-        let mut fonts = Self {
-            handles: Vec::new(),
-            width: 1,
-            height: 1,
-            cursor_y: 0..1,
-        };
-        // SAFETY: valid font parameters and static face name. Each created font
-        // is owned by Fonts and deleted only after being deselected from a DC.
-        unsafe {
-            for index in 0..8 {
-                let font = CreateFontW(
-                    -(((12 * dpi + 36) / 72) as i32),
-                    0,
-                    0,
-                    0,
-                    if index & 1 != 0 {
-                        FW_BOLD as i32
-                    } else {
-                        FW_NORMAL as i32
-                    },
-                    u32::from(index & 2 != 0),
-                    u32::from(index & 4 != 0),
-                    0,
-                    DEFAULT_CHARSET as u32,
-                    OUT_DEFAULT_PRECIS as u32,
-                    CLIP_DEFAULT_PRECIS as u32,
-                    CLEARTYPE_QUALITY as u32,
-                    (FIXED_PITCH | FF_MODERN) as u32,
-                    w!("Cascadia Mono"),
-                );
-                if font.is_null() {
-                    return Err(io::Error::last_os_error());
-                }
-                fonts.handles.push(font);
-            }
-            let dc = GetDC(ptr::null_mut());
-            if dc.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let old = SelectObject(dc, fonts.handles[0]);
-            let mut metrics = TEXTMETRICW::default();
-            let success = GetTextMetricsW(dc, &mut metrics);
-            SelectObject(dc, old);
-            ReleaseDC(ptr::null_mut(), dc);
-            if success == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            fonts.width = metrics.tmAveCharWidth.max(1);
-            fonts.height = (metrics.tmHeight + metrics.tmExternalLeading).max(1);
-            // Use the font's em height, extending through the descenders.
-            let bottom = metrics.tmHeight.clamp(1, fonts.height);
-            fonts.cursor_y = metrics.tmInternalLeading.clamp(0, bottom - 1)..bottom;
-        }
-        Ok(fonts)
-    }
-}
-
-impl Drop for Fonts {
-    fn drop(&mut self) {
-        for handle in &self.handles {
-            // SAFETY: uniquely owned fonts, deselected after every paint.
-            unsafe { DeleteObject(*handle) };
-        }
-    }
-}
-
 fn modifiers() -> Modifiers {
     // SAFETY: querying the thread's keyboard state needs no pointers.
     unsafe {
@@ -698,6 +664,21 @@ const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
     red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
 }
 
+fn cell_colors(cell: &vt100::Cell) -> (u32, u32) {
+    let fg = color(cell.fgcolor(), DEFAULT_FOREGROUND);
+    let bg = color(cell.bgcolor(), DEFAULT_BACKGROUND);
+    if cell.inverse() { (bg, fg) } else { (fg, bg) }
+}
+
+fn can_share_symbol_space(next: Option<&vt100::Cell>, background: u32) -> bool {
+    next.is_some_and(|cell| {
+        matches!(cell.contents(), "" | " ")
+            && !cell.is_wide_continuation()
+            && !cell.underline()
+            && cell_colors(cell).1 == background
+    })
+}
+
 fn color(color: vt100::Color, default: u32) -> u32 {
     match color {
         vt100::Color::Default => default,
@@ -735,5 +716,38 @@ fn color(color: vt100::Color, default: u32) -> u32 {
                 rgb(level, level, level)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_padding_respects_neighboring_text_and_cell_attributes() {
+        for (after, fits) in [
+            (" ", true),
+            ("", true),
+            ("\x1b[34m ", true),
+            ("D", false),
+            ("\u{f115}", false),
+            ("猫", false),
+            ("\x1b[4m ", false),
+            ("\x1b[44m ", false),
+            ("\x1b[7m ", false),
+        ] {
+            let mut terminal = Terminal::new(1, 4);
+            terminal.process(format!("\u{f024d}{after}").as_bytes());
+            let screen = terminal.screen();
+            assert_eq!(
+                can_share_symbol_space(screen.cell(0, 1), DEFAULT_BACKGROUND),
+                fits,
+                "{after:?}"
+            );
+            assert!(!can_share_symbol_space(
+                screen.cell(0, 4),
+                DEFAULT_BACKGROUND
+            ));
+        }
     }
 }

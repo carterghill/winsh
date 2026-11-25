@@ -9,7 +9,11 @@ description = "A native Windows terminal hosting winsh through ConPTY."
 [dependencies]
 vt100 = "0.16"
 
+[dev-dependencies]
+tempfile = { version = "3.26", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

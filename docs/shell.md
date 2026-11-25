@@ -45,6 +45,36 @@ The input loop accepts UTF-8 redirected source and normalizes CRLF to LF.
 Interactive Windows input is decoded from the console's UTF-16. Command strings
 passed through `-c` are preserved as supplied.
 
+## Aliases and startup configuration
+
+Interactive Winsh sessions start with this alias for the bundled `ls` utility.
+
+~~~sh
+alias ls='ls --color --icons --directories-first'
+~~~
+
+Winsh then reads `%APPDATA%\winsh\winshrc` on Windows. On Unix it reads
+`$XDG_CONFIG_HOME/winsh/winshrc`, defaulting to `~/.config/winsh/winshrc`.
+Create the directory and save the file as UTF-8 to keep personal aliases
+across launches. Startup configuration applies only to the interactive prompt.
+Scripts, `winsh -c`, and piped input start with an empty alias table.
+
+~~~sh
+alias ll='ls -A'           # Define or replace a shortcut in this session
+alias ll                  # Print its definition
+alias                     # List definitions in reusable shell syntax
+ll 'my folder'            # Pass an additional argument, preserving its spaces
+\ls -1                    # Bypass the ls alias for one invocation
+unalias ls                # Put this in winshrc to disable the shipped alias
+~~~
+
+An alias expands the unquoted command name to a command and optional arguments.
+Each name expands once in a chain, so `ls` can refer to itself. Quoting in the
+replacement controls variable expansion and argument boundaries at invocation.
+Aliases work in pipelines, with redirection, and in subshells. Use a shell
+function for a shortcut whose body contains multiple commands. `unalias -a`
+clears the session's alias table.
+
 ## Interactive history
 
 At the prompt, press ↑ to recall a command, edit it, and press Enter to run it.
@@ -69,7 +99,7 @@ For example, from the repository root, type `cd crat` and press Tab to get
 `cd crates/`. Keep typing to complete a path inside that directory.
 
 At the start of a command or pipeline stage, Tab finds built-ins, bundled
-utilities, shell functions, and executables on the session's PATH. On Windows
+utilities, aliases, shell functions, and executables on the session's PATH. On Windows
 it offers `.exe`, `.com`, and `.sh` files. Use `./` to complete a program in
 the current directory. Arguments and file redirections complete paths relative
 to the shell's current directory. After `cd`, Tab offers directories.
@@ -200,7 +230,10 @@ if grep -Fq 'build failed' combined.txt; then echo 'check the build log'; fi
 
 | Command | Supported behavior |
 | --- | --- |
-| `ls [-1aAd] [PATH ...]` | List the current directory by default. Print sorted names, one per line. `-A` includes dotfiles and `-a` also includes `.` and `..`. With `-d`, print directory operands themselves. |
+| `ls [OPTIONS] [PATH ...]` | List the current directory by default. Sort names down columns to fit the terminal. `-1` or redirected output uses one entry per line. `-A` includes dotfiles and `-a` also includes `.` and `..`. With `-d`, print directory operands themselves. |
+| `ls --color` or `ls --colors` | Style names by file type using eza's default colors and the active terminal palette. |
+| `ls --icons` | Add Nerd Font glyphs for named folders, empty and populated folders, and file names and extensions. |
+| `ls --directories-first` or `ls --group-directories-first` | Group directories before files. Names are sorted within each group. |
 | `cat [-bnu] [FILE ...]` | Copy bytes in order, including NULs, CRLF and a partial final line. `-n` numbers all lines, `-b` numbers nonempty lines and overrides `-n`. Numbering continues across files. `-u` requests immediate output, which is already the default. |
 | `grep [OPTIONS] PATTERN [FILE ...]` | Select matching lines. The default supports common basic regular expressions, including anchors, dot, bracket classes, star and escaped groups or repetitions. `-E` enables extended operators such as `(a|b)+`. `-F` treats the pattern as literal text. |
 | `grep -e PATTERN` | Supply a pattern beginning with a dash or repeat `-e` for alternatives. Newline-separated patterns also select any match. |
@@ -212,6 +245,11 @@ if grep -Fq 'build failed' combined.txt; then echo 'check the build log'; fi
 | `cp [-rR] SOURCE ... DEST` | Copy file contents and overwrite existing files. `-r` or `-R` copies directory trees, including empty directories. |
 | `mv SOURCE ... DEST` | Rename or move files and directories, including between drives. Existing destination files can be replaced. |
 | `rm [-frR] PATH ...` | Remove files. Use `-r` or `-R` for a directory tree. `-f` accepts missing operands and missing files. Removing a directory link or Windows junction removes the link itself. |
+
+`--color` and `--icons` each accept `=auto` (the default when the flag is used),
+`=always`, or `=never`. Later flags override earlier ones, including alias
+defaults. For example, `ls --icons=never` keeps the directory colors, and
+`ls >files.txt` writes plain names. Set `COLUMNS` to override the terminal width.
 
 For `cp` and `mv`, an existing destination directory receives each source under
 its own name. Multiple sources require a destination directory. To merge a
@@ -409,7 +447,7 @@ remain pending. The `function name` spelling is unsupported; use `name() { ...; 
 Advanced quoting within parameter default words, combined whitespace/nonwhitespace
 IFS edge cases, and escaped IFS characters in non-raw read are not fully Bash-compatible.
 `return` accepts a nonnegative status; shell options (`set -e`, `-u`, pipefail,
-shopt), readonly variables, aliases, traps, and POSIX special-built-in error rules
+shopt), readonly variables, traps, and POSIX special-built-in error rules
 are not implemented. Unsupported built-in flags/forms report errors.
 
 Here-documents (`<<`, `<<-`), here-strings (`<<<`), process substitution, named

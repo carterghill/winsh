@@ -16,7 +16,7 @@ pub struct CompletionContext {
     cwd: PathBuf,
     path: Option<OsString>,
     home: Option<PathBuf>,
-    functions: Vec<String>,
+    session_commands: Vec<String>,
 }
 
 impl Shell {
@@ -25,7 +25,12 @@ impl Shell {
             cwd: self.cwd.clone(),
             path: self.env("PATH").map(ToOwned::to_owned),
             home: self.home().map(PathBuf::from),
-            functions: self.functions.keys().cloned().collect(),
+            session_commands: self
+                .functions
+                .keys()
+                .chain(self.aliases.keys())
+                .cloned()
+                .collect(),
         }
     }
 }
@@ -54,7 +59,7 @@ impl CompletionContext {
                     .map(str::to_owned),
             );
             names.extend(
-                self.functions
+                self.session_commands
                     .iter()
                     .filter(|name| name.starts_with(prefix))
                     .cloned(),

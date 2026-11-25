@@ -2,6 +2,7 @@
 
 pub mod syntax;
 
+mod aliases;
 mod arithmetic;
 mod builtins;
 mod completion;

@@ -247,6 +247,7 @@ struct Request {
     input: Input,
     variables: BTreeMap<String, OsString>,
     functions: BTreeMap<String, ShellCommand>,
+    aliases: BTreeMap<String, crate::aliases::Alias>,
     args: Vec<OsString>,
     arg0: OsString,
     status: i32,
@@ -342,6 +343,7 @@ impl Shell {
         };
         self.variables = request.variables;
         self.functions = request.functions;
+        self.aliases = request.aliases;
         self.set_arguments(request.arg0, request.args);
         self.last_status = request.status;
         self.jobs.last_pid = request.last_pid;
@@ -542,6 +544,11 @@ impl Shell {
             },
             functions: if shell_task {
                 self.functions.clone()
+            } else {
+                BTreeMap::new()
+            },
+            aliases: if shell_task {
+                self.aliases.clone()
             } else {
                 BTreeMap::new()
             },

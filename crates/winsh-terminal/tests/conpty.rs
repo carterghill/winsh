@@ -61,19 +61,24 @@ impl Harness {
     }
 
     fn shell(history: &Path) -> Self {
+        Self::shell_with_profile(history, Path::new(env!("CARGO_TARGET_TMPDIR")))
+    }
+
+    fn shell_with_profile(history: &Path, appdata: &Path) -> Self {
         let shell = Path::new(env!("CARGO_BIN_EXE_winsh-terminal")).with_file_name("winsh.exe");
         assert!(
             shell.is_file(),
             "build the workspace first: {}",
             shell.display()
         );
-        // Set history only in this child, using native arguments for both paths.
+        // Isolate this child from the developer's history and startup script.
         let args = [
             OsString::from("-c"),
-            OsString::from(r#"WINSH_HISTORY_FILE="$1" "$2""#),
+            OsString::from(r#"WINSH_HISTORY_FILE="$1" APPDATA="$3" "$2""#),
             OsString::from("test"),
             history.into(),
             shell.clone().into(),
+            appdata.into(),
         ];
         let terminal = Arc::new(Mutex::new(Terminal::new(40, 160)));
         let session = Session::spawn(&shell, &args, 40, 160, Arc::clone(&terminal)).unwrap();
@@ -200,6 +205,53 @@ fn failed_process_start_returns_an_error_without_hanging() {
     let terminal = Arc::new(Mutex::new(Terminal::new(12, 80)));
     let directory = env::temp_dir(); // Exists, but cannot be executed.
     assert!(Session::spawn(&directory, &[], 12, 80, terminal).is_err());
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_interactive_ls_uses_profile_icons_colors_and_a_column_major_grid() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let config = tmp.path().join("winsh");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::write(config.join("winshrc"), "\u{feff}alias show='ls'\r\n").unwrap();
+    let listing = tmp.path().join("listing");
+    for folder in ["Downloads", "Pictures", "Public"] {
+        std::fs::create_dir_all(listing.join(folder)).unwrap();
+    }
+    for file in ["aaa.log", "zzz.log"] {
+        std::fs::write(listing.join(file), "").unwrap();
+    }
+    let h = Harness::shell_with_profile(Path::new(""), tmp.path());
+    h.enter(&format!(
+        "cd '{}'",
+        listing.display().to_string().replace('\'', "'\\''")
+    ));
+    h.enter("COLUMNS=25 show");
+    h.wait_for("\u{f115}  Public");
+    let contents = h.contents();
+    assert!(
+        contents.contains("\u{f024d}  Downloads  \u{f18d}  aaa.log"),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("\u{f024f}  Pictures   \u{f18d}  zzz.log"),
+        "{contents}"
+    );
+    {
+        let term = h.terminal.lock().unwrap();
+        let screen = term.screen();
+        let row = (0..screen.size().0)
+            .find(|&r| screen.cell(r, 0).unwrap().contents() == "\u{f024d}")
+            .unwrap();
+        assert!(matches!(
+            screen.cell(row, 3).unwrap().fgcolor(),
+            vt100::Color::Idx(4 | 12)
+        ));
+    }
+    h.enter("show | cat");
+    h.wait_for("\nDownloads\nPictures\nPublic\naaa.log\nzzz.log");
+    h.enter("exit 0");
+    h.wait_for_exit(0);
 }
 
 #[test]

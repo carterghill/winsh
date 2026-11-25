@@ -8,6 +8,7 @@ description = "A native Windows shell with Bash-compatible syntax."
 
 [dependencies]
 regex = "1"
+unicode-width = "0.2"
 rustyline = { version = "17", default-features = false, features = ["with-file-history", "custom-bindings"] }
 same-file = "1"
 tempfile = { version = "3.26", default-features = false }
@@ -17,6 +18,7 @@ serde_json = { version = "1", features = ["unbounded_depth"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+rustix = { version = "1", features = ["termios"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1"

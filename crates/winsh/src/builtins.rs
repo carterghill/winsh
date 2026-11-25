@@ -3,7 +3,7 @@ use std::{ffi::OsString, fs, io, path::Path};
 use crate::{Outcome, Shell, ShellIo, platform};
 
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
-    ["cd", "pwd", "exit"]
+    ["cd", "pwd", "exit", "alias", "unalias"]
         .into_iter()
         .chain(crate::jobs::BUILTINS.iter().copied())
         .chain(crate::language_builtins::NAMES.iter().copied())
@@ -24,6 +24,8 @@ pub(crate) fn dispatch(
         Some("pwd") => pwd(shell, args, io)?,
         Some("cd") => cd(shell, args, io)?,
         Some("exit") => exit(shell, args, io)?,
+        Some("alias") => Outcome::Continue(crate::aliases::define(shell, args, io)?),
+        Some("unalias") => Outcome::Continue(crate::aliases::remove(shell, args, io)?),
         Some(name) if crate::jobs::BUILTINS.contains(&name) => {
             Outcome::Continue(shell.jobs.builtin(name, args, io)?)
         }

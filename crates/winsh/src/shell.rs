@@ -45,6 +45,7 @@ pub struct Shell {
     pub(crate) environment: Vec<(OsString, OsString)>,
     pub(crate) variables: BTreeMap<String, OsString>,
     pub(crate) functions: BTreeMap<String, Command>,
+    pub(crate) aliases: BTreeMap<String, crate::aliases::Alias>,
     pub(crate) positional: Vec<OsString>,
     pub(crate) arg0: OsString,
     pub(crate) flow: Option<Flow>,
@@ -82,6 +83,7 @@ impl Shell {
             environment: environment.into_iter().collect(),
             variables: BTreeMap::new(),
             functions: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             positional: Vec::new(),
             arg0: "winsh".into(),
             flow: None,
@@ -110,6 +112,40 @@ impl Shell {
     }
     pub fn last_status(&self) -> i32 {
         self.last_status
+    }
+    /// Load interactive defaults, followed by the user's optional startup script.
+    pub fn load_interactive_profile(&mut self, io: &mut ShellIo) -> io::Result<Outcome> {
+        self.run("alias ls='ls --color --icons --directories-first'", io)?;
+        #[cfg(windows)]
+        let root = self
+            .env("APPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute());
+        #[cfg(unix)]
+        let root = self
+            .env("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| {
+                self.home()
+                    .map(|p| Path::new(p).join(".config"))
+                    .filter(|p| p.is_absolute())
+            });
+        if let Some(path) = root.map(|p| p.join("winsh").join("winshrc")) {
+            match path.try_exists() {
+                Ok(true) => {
+                    return crate::language_builtins::dispatch(
+                        self,
+                        "source",
+                        &[path.into_os_string()],
+                        io,
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => io.err(format_args!("winsh: {}: {error}\n", path.display()))?,
+            }
+        }
+        Ok(Outcome::Continue(0))
     }
     pub fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
@@ -310,6 +346,8 @@ impl Shell {
         pipe_stderr: bool,
     ) -> io::Result<Outcome> {
         self.substitution_status = None;
+        let expanded = crate::aliases::expand(&self.aliases, simple);
+        let simple = expanded.as_ref().unwrap_or(simple);
         let mut assignments = Vec::new();
         let mut start = 0;
         for word in &simple.words {
@@ -718,7 +756,7 @@ impl Shell {
         }
     }
 }
-fn assignment(word: &Word) -> Option<(String, Word, bool)> {
+pub(crate) fn assignment(word: &Word) -> Option<(String, Word, bool)> {
     let first = word.parts.first()?;
     let WordPartKind::Text(text) = &first.kind else {
         return None;

@@ -19,7 +19,9 @@ function Get-SourceStamp {
             foreach ($name in 'Cargo.toml', 'build.rs') {
                 Get-Item -LiteralPath (Join-Path $crate.FullName $name) -ErrorAction SilentlyContinue
             }
-            Get-ChildItem -LiteralPath (Join-Path $crate.FullName 'src') -File -Recurse -ErrorAction SilentlyContinue
+            foreach ($directory in 'src', 'assets') {
+                Get-ChildItem -LiteralPath (Join-Path $crate.FullName $directory) -File -Recurse -ErrorAction SilentlyContinue
+            }
         }
     )
     ($files | Sort-Object FullName | ForEach-Object {

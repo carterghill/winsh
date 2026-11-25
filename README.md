@@ -80,6 +80,11 @@ descriptor handling, exit statuses, and the supported subset.
 `cargo run -- --utility grep -in windows README.md` from PowerShell.
 See the [utility options and exit statuses](docs/shell.md#file-utilities).
 
+Interactive `ls` shows colored names and folder icons in a directories-first
+grid. `ls -1` gives one entry per line, and `ls >files.txt` writes plain names.
+Use `alias ls` to inspect the default, or customize it in
+`%APPDATA%\winsh\winshrc`. [Aliases and startup configuration](docs/shell.md#aliases-and-startup-configuration)
+
 Scripts use the same engine as the prompt. For example:
 
 ~~~sh

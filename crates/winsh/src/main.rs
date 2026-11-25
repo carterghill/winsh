@@ -149,6 +149,9 @@ fn run() -> io::Result<i32> {
         Mode::Input => {
             if interactive {
                 shell.enable_interactive_jobs();
+                if let Outcome::Exit(status) = shell.load_interactive_profile(&mut streams)? {
+                    return Ok(status);
+                }
             }
             if interactive && let Ok(label) = env::var("WINSH_DEV_BUILD") {
                 writeln!(io::stderr(), "winsh dev build {label}")?;

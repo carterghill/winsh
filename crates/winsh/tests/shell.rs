@@ -1031,6 +1031,89 @@ fn builtin_output_write_errors_fail_the_command_and_keep_the_session_alive() {
 }
 
 #[test]
+fn aliases_preserve_words_self_references_and_session_scope() {
+    let mut f = Fixture::new();
+    assert_eq!(
+        f.run(r#"alias echo='echo prefix' two='echo "two words"' say='two'"#)
+            .status(),
+        0
+    );
+    f.run(r#"say 'extra arg' | cat; \echo plain; 'echo' plain; name=echo; "$name" plain"#);
+    assert_eq!(f.out(), "prefix two words extra arg\nplain\nplain\nplain\n");
+    f.run("alias say; (unalias echo; say); say");
+    assert!(
+        f.out()
+            .ends_with("alias say='two'\ntwo words\nprefix two words\n")
+    );
+    f.run(r#"alias value='printf "<%s>\n" "$later"'; later='first run'; value; later=next; value"#);
+    assert!(f.out().ends_with("<first run>\n<next>\n"));
+    f.run("alias a=b b=a; a() { echo cycle-ended; }; a; unalias -a; echo done");
+    assert!(f.out().ends_with("prefix cycle-ended\ndone\n"));
+    assert_eq!(f.run("alias say").status(), 1);
+}
+
+#[test]
+fn personal_profile_can_remove_the_default_and_only_loads_at_the_prompt() {
+    let mut f = Fixture::new();
+    let config_var = if cfg!(windows) {
+        "APPDATA"
+    } else {
+        "XDG_CONFIG_HOME"
+    };
+    let dir = f.root.0.join("winsh");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("winshrc"),
+        "unalias ls\nalias greet='echo from-profile'\n",
+    )
+    .unwrap();
+    let profile_root = f.root.0.clone();
+    f.run(&format!("export {config_var}={}", quote(&profile_root)));
+    assert_eq!(
+        f.shell
+            .load_interactive_profile(&mut f.io)
+            .unwrap()
+            .status(),
+        0
+    );
+    assert_eq!(f.run("alias ls").status(), 1);
+    f.run("greet");
+    assert_eq!(f.out(), "from-profile\n");
+    let result = Command::new(env!("CARGO_BIN_EXE_winsh"))
+        .env(config_var, &profile_root)
+        .args(["-c", "alias"])
+        .output()
+        .unwrap();
+    assert!(result.status.success() && result.stdout.is_empty() && result.stderr.is_empty());
+}
+
+#[test]
+fn ls_flags_override_alias_defaults_and_keep_redirected_output_plain() {
+    let mut f = Fixture::new();
+    f.run("mkdir listing; cd listing; mkdir Downloads Public; touch aaa.log picture.png");
+    assert_eq!(
+        f.run("alias ls='ls --colors --icons --group-directories-first'; ls")
+            .status(),
+        0
+    );
+    assert_eq!(f.out(), "Downloads\nPublic\naaa.log\npicture.png\n");
+    f.run("ls --color=always --icons=always >../styled");
+    let styled = fs::read_to_string(f.root.0.join("styled")).unwrap();
+    assert!(styled.contains("\x1b[34m\u{f024d}\x1b[0m  \x1b[1;34mDownloads\x1b[0m"));
+    assert!(styled.contains("\u{f115}\x1b[0m  \x1b[1;34mPublic"));
+    assert!(styled.contains("\u{f18d}  aaa.log"));
+    assert!(styled.contains("\x1b[35mpicture.png\x1b[0m"));
+    f.run("touch Public/child; ls --icons=always --color=never -d Public >../folder");
+    assert_eq!(
+        fs::read_to_string(f.root.0.join("folder")).unwrap(),
+        "\u{e5ff}  Public\n"
+    );
+    f.run("ls --icons=always --icons=never --color=always --colors=never | cat >../plain");
+    assert_eq!(fs::read_to_string(f.root.0.join("plain")).unwrap(), f.out());
+    assert_eq!(f.run("ls --icons=invalid").status(), 2);
+}
+
+#[test]
 fn ls_lists_session_paths_without_path_tools() {
     let mut f = Fixture::new();
     let work = f.root.0.join("work");

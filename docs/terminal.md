@@ -37,7 +37,7 @@ window. Its first prompt shows `winsh dev build #1` and the local time. The
 launching PowerShell shows compilation progress, diagnostics, and the terminal
 process ID after each launch.
 
-The watcher checks crate source directories, build scripts, Cargo manifests,
+The watcher checks crate source and asset directories, build scripts, Cargo manifests,
 `Cargo.lock`, the Rust toolchain file, and workspace Cargo configuration.
 It builds both binaries under `target\watch` and runs private copies so Windows
 can keep the current session open during compilation. A build error leaves that
@@ -81,7 +81,16 @@ combining characters retain their terminal cell positions. Window title and
 basic device/status/cursor queries are supported.
 
 GDI renders a fixed 12-point Cascadia Mono font with a Windows fallback and
-per-monitor DPI updates. The screen is double buffered. Keyboard input and
+per-monitor DPI updates. For private-use icon characters, the terminal loads
+Symbols Nerd Font Mono 3.4.0 from its executable. Icons retain their natural
+proportions. The terminal aligns the visible strokes of each icon with the
+surrounding text. `ls --icons` prints two spaces after each icon so the icon
+can extend into the first and leave a full cell clear before the filename.
+An icon next to text fits within its own cell. This works for `ls` and
+other programs that emit Nerd Font icons. In Windows Terminal, select a Nerd
+Font in the Winsh profile's Appearance settings. [Bundled font and license](../crates/winsh-terminal/assets)
+
+The screen is double buffered. Keyboard input and
 protocol replies share an input worker; the output worker parses directly into
 the screen model. ConPTY control and shutdown run independently of the window.
 Closing a session terminates its shell and descendants through a job object,

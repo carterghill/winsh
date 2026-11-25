@@ -2,9 +2,15 @@ use std::{ffi::OsString, fs, io, path::Path};
 
 use crate::{Outcome, Shell, ShellIo, platform};
 
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    ["cd", "pwd", "exit"]
+        .into_iter()
+        .chain(crate::language_builtins::NAMES.iter().copied())
+}
+
 pub(crate) fn recognizes(name: &std::ffi::OsStr) -> bool {
-    matches!(name.to_str(), Some("cd" | "pwd" | "exit"))
-        || crate::language_builtins::recognizes(name)
+    name.to_str()
+        .is_some_and(|name| names().any(|builtin| builtin == name))
 }
 
 pub(crate) fn dispatch(
@@ -17,7 +23,7 @@ pub(crate) fn dispatch(
         Some("pwd") => pwd(shell, args, io)?,
         Some("cd") => cd(shell, args, io)?,
         Some("exit") => exit(shell, args, io)?,
-        Some(name) if crate::language_builtins::recognizes(&arguments[0]) => {
+        Some(name) if crate::language_builtins::NAMES.contains(&name) => {
             crate::language_builtins::dispatch(shell, name, args, io)?
         }
         _ => return Ok(None),

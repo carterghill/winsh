@@ -4,6 +4,7 @@ pub mod syntax;
 
 mod arithmetic;
 mod builtins;
+mod completion;
 mod exec;
 mod expand;
 mod glob;
@@ -15,6 +16,7 @@ mod shell;
 mod streams;
 mod utilities;
 
+pub use completion::CompletionContext;
 pub use shell::{Outcome, Shell};
 pub use streams::ShellIo;
 pub use utilities::Utility;

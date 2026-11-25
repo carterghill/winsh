@@ -7,6 +7,7 @@ use std::{fmt, ops::Range};
 
 mod parser;
 
+pub(crate) use parser::completion::{Target, completion_word};
 pub(crate) use parser::parse_fragment;
 pub use parser::parse_script;
 pub use parser::valid_name;

@@ -5,30 +5,10 @@ use std::{
     path::Path,
 };
 
-pub(crate) fn recognizes(name: &OsStr) -> bool {
-    matches!(
-        name.to_str(),
-        Some(
-            ":" | "true"
-                | "false"
-                | "echo"
-                | "printf"
-                | "test"
-                | "["
-                | "export"
-                | "unset"
-                | "local"
-                | "set"
-                | "shift"
-                | "return"
-                | "break"
-                | "continue"
-                | "."
-                | "source"
-                | "read"
-        )
-    )
-}
+pub(crate) const NAMES: &[&str] = &[
+    ":", "true", "false", "echo", "printf", "test", "[", "export", "unset", "local", "set",
+    "shift", "return", "break", "continue", ".", "source", "read",
+];
 pub(crate) fn dispatch(
     shell: &mut Shell,
     name: &str,

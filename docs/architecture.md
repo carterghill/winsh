@@ -152,9 +152,10 @@ no shell framework, async runtime, or GUI toolkit dependency.
 6. **Implemented subset:** bundled ls, cat, and grep support directory listings,
    file input, redirections, and pipelines. Script tests cover concatenation and log
    filtering. See [file utilities](shell.md#file-utilities) for options and statuses.
-7. **Implemented subset:** interactive line editing and persistent command history.
-   Path and command completion, background jobs, and job control are still open.
-   See [interactive history](shell.md#interactive-history).
+7. **Implemented subset:** interactive line editing, persistent command history,
+   and Tab completion for commands and paths. Background jobs and job control
+   are still open. See [interactive history](shell.md#interactive-history) and
+   [Tab completion](shell.md#tab-completion).
 
 Test behavior at the lowest useful level: pure parser tests, engine tests with
 explicit state and I/O, and Windows integration tests for processes and

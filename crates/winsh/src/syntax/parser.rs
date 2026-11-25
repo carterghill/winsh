@@ -43,6 +43,8 @@ struct Parser<'a> {
     nesting: usize,
 }
 
+#[path = "completion.rs"]
+pub(crate) mod completion;
 #[path = "language_parser.rs"]
 mod language;
 pub(crate) use language::parse_fragment;
@@ -178,6 +180,37 @@ impl Parser<'_> {
         descriptor: Option<u8>,
         start: usize,
     ) -> Result<Redirection, ParseError> {
+        let kind = self.redirection_kind(start)?;
+        let operator_end = self.pos;
+        self.skip_spaces();
+        if self.peek() == Some('(') {
+            return Err(self.error(
+                ParseErrorKind::UnsupportedSyntax("process substitution"),
+                start,
+                self.pos + 1 - start,
+            ));
+        }
+        if matches!(
+            self.peek(),
+            None | Some('\n' | '#' | '|' | '<' | '>' | '&' | ';' | '(' | ')')
+        ) {
+            return Err(self.error(
+                ParseErrorKind::MissingRedirectionTarget,
+                start,
+                operator_end - start,
+            ));
+        }
+        let target = self.word()?;
+        let end = target.span.end;
+        Ok(Redirection {
+            descriptor,
+            kind,
+            target,
+            span: start..end,
+        })
+    }
+
+    fn redirection_kind(&mut self, start: usize) -> Result<RedirectionKind, ParseError> {
         let first = self.peek().unwrap();
         self.pos += 1;
         let kind = match first {
@@ -226,33 +259,7 @@ impl Parser<'_> {
             },
             _ => unreachable!(),
         };
-        let operator_end = self.pos;
-        self.skip_spaces();
-        if self.peek() == Some('(') {
-            return Err(self.error(
-                ParseErrorKind::UnsupportedSyntax("process substitution"),
-                start,
-                self.pos + 1 - start,
-            ));
-        }
-        if matches!(
-            self.peek(),
-            None | Some('\n' | '#' | '|' | '<' | '>' | '&' | ';' | '(' | ')')
-        ) {
-            return Err(self.error(
-                ParseErrorKind::MissingRedirectionTarget,
-                start,
-                operator_end - start,
-            ));
-        }
-        let target = self.word()?;
-        let end = target.span.end;
-        Ok(Redirection {
-            descriptor,
-            kind,
-            target,
-            span: start..end,
-        })
+        Ok(kind)
     }
 
     fn skip_spaces(&mut self) {

@@ -5,14 +5,60 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rustyline::{Config, DefaultEditor, error::ReadlineError};
+use rustyline::{
+    CompletionType, Config, Context, Editor, Helper,
+    completion::{Completer, Pair},
+    error::ReadlineError,
+    highlight::Highlighter,
+    hint::Hinter,
+    history::DefaultHistory,
+    validate::Validator,
+};
 #[cfg(windows)]
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use winsh::{CompletionContext, Shell};
 
 use crate::console;
+
+struct ShellCompleter {
+    session: CompletionContext,
+    pending: String,
+}
+
+impl Completer for ShellCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let before = format!("{}{}", self.pending, &line[..pos]);
+        let candidates = self
+            .session
+            .candidates(&before, &line[pos..])
+            .into_iter()
+            .map(|(display, replacement)| Pair {
+                display,
+                replacement,
+            })
+            .collect();
+        Ok((pos, candidates))
+    }
+}
+
+impl Hinter for ShellCompleter {
+    type Hint = String;
+}
+impl Validator for ShellCompleter {}
+impl Highlighter for ShellCompleter {}
+impl Helper for ShellCompleter {}
+
+type LineEditor = Editor<ShellCompleter, DefaultHistory>;
 
 pub enum Input {
     Redirected(fs::File),
@@ -41,19 +87,23 @@ impl Input {
 
     pub fn read_line(
         &mut self,
-        cwd: &Path,
-        continuation: bool,
+        shell: &Shell,
+        pending: &str,
         line: &mut String,
     ) -> io::Result<usize> {
         if let Self::Redirected(file) = self {
             return console::read_line_unbuffered(file, line);
         }
-        let prompt = if continuation {
-            "> ".to_owned()
+        let prompt = if pending.is_empty() {
+            format!("{} $ ", shell.cwd().display())
         } else {
-            format!("{} $ ", cwd.display())
+            "> ".to_owned()
         };
         if let Self::Edited(editor) = self {
+            editor.lines.set_helper(Some(ShellCompleter {
+                session: shell.completion_context(),
+                pending: pending.to_owned(),
+            }));
             return match editor.lines.readline(&prompt) {
                 Ok(source) => {
                     *line = source;
@@ -88,7 +138,7 @@ impl Input {
 }
 
 pub struct CommandEditor {
-    lines: DefaultEditor,
+    lines: LineEditor,
     path: Option<PathBuf>,
     #[cfg(windows)]
     eof: ConsoleEof,
@@ -117,10 +167,11 @@ impl rustyline::ConditionalEventHandler for ConsoleEof {
 impl CommandEditor {
     fn new() -> io::Result<Self> {
         let config = Config::builder()
+            .completion_type(CompletionType::List)
             .max_history_size(1000)
             .map_err(io::Error::other)?
             .build();
-        let mut lines = DefaultEditor::with_config(config).map_err(io::Error::other)?;
+        let mut lines = LineEditor::with_config(config).map_err(io::Error::other)?;
         #[cfg(windows)]
         let eof = {
             let eof = ConsoleEof::default();
@@ -159,7 +210,7 @@ impl CommandEditor {
     }
 }
 
-fn load_history(lines: &mut DefaultEditor, path: &Path) -> rustyline::Result<()> {
+fn load_history(lines: &mut LineEditor, path: &Path) -> rustyline::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

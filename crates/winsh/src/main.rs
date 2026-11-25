@@ -154,7 +154,7 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
     let mut pending = String::new();
     loop {
         let mut line = String::new();
-        let read = input.read_line(shell.cwd(), !pending.is_empty(), &mut line);
+        let read = input.read_line(shell, &pending, &mut line);
         if matches!(&read, Err(error) if error.kind() == io::ErrorKind::Interrupted) {
             pending.clear();
             shell.interrupt();

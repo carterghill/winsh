@@ -263,6 +263,28 @@ fn winsh_interactive_smoke() {
 
 #[test]
 #[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_tab_completes_at_the_prompt() {
+    let harness = Harness::shell(Path::new(""));
+    // Remove host-dependent command matches and change the logical cwd.
+    harness.enter("export PATH=''; cd src");
+    harness.wait_for(r"winsh-terminal\src $");
+    harness.enter("pri\t'%s\\n' command-completed");
+    harness.wait_for("\ncommand-completed");
+    harness.enter("echo input-prefix | gre\tinput");
+    harness.wait_for("\ninput-prefix");
+    harness.enter("echo 'sess\t");
+    harness.wait_for("\nsession.rs");
+    harness.enter("complete_one() { echo first-result; }; complete_two() { echo second-result; }");
+    harness.session.write(b"comple\t\t".to_vec()).unwrap();
+    harness.wait_for("\ncomplete_one");
+    harness.enter("tw\t");
+    harness.wait_for("\nsecond-result");
+    harness.enter("exit");
+    harness.wait_for_exit(0);
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
 fn winsh_history_survives_restarts() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

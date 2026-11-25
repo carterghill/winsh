@@ -202,7 +202,7 @@ fn candidate(path: &Path) -> io::Result<PathBuf> {
     Ok(path.to_owned())
 }
 
-fn executable_file(path: &Path) -> io::Result<()> {
+pub(crate) fn executable_file(path: &Path) -> io::Result<()> {
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(io::Error::new(

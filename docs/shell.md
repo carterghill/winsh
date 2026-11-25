@@ -62,6 +62,22 @@ piped input do not add entries. Winsh uses basic console input when output is
 redirected or the terminal advertises limited editing support (such as `TERM=dumb`).
 History navigation requires the interactive editor.
 
+## Tab completion
+
+Press Tab to complete a command or path at the cursor. If several names match,
+the first Tab inserts their shared prefix. Press Tab again to list the choices.
+For example, from the repository root, type `cd crat` and press Tab to get
+`cd crates/`. Keep typing to complete a path inside that directory.
+
+At the start of a command or pipeline stage, Tab finds built-ins, bundled
+utilities, shell functions, and executables on the session's PATH. On Windows
+it offers `.exe`, `.com`, and `.sh` files. Use `./` to complete a program in
+the current directory. Arguments and file redirections complete paths relative
+to the shell's current directory. After `cd`, Tab offers directories.
+
+Completion handles literal paths, including `~/`, quoted names, and spaces.
+It leaves variable and command substitutions for execution when you press Enter.
+
 ## Built-ins and paths
 
 | Command | Current behavior |
@@ -333,8 +349,8 @@ descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is 
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.
 
-There is no arbitrary shebang dispatch, CDPATH lookup,
-completion, configurable prompt, or background jobs yet.
+There is no arbitrary shebang dispatch, CDPATH lookup, configurable prompt, or
+background jobs yet.
 Windows Ctrl+C support covers foreground execution; Unix signal
 and job-control integration is deferred.
 

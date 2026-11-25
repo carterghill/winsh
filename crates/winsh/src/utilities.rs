@@ -22,13 +22,15 @@ pub enum Utility {
 }
 
 impl Utility {
+    pub(crate) const COMMANDS: [(&'static str, Self); 3] =
+        [("cat", Self::Cat), ("grep", Self::Grep), ("ls", Self::Ls)];
+
     pub fn from_name(name: &OsStr) -> Option<Self> {
-        match name.to_str()? {
-            "cat" => Some(Self::Cat),
-            "grep" => Some(Self::Grep),
-            "ls" => Some(Self::Ls),
-            _ => None,
-        }
+        let name = name.to_str()?;
+        Self::COMMANDS
+            .into_iter()
+            .find(|(command, _)| *command == name)
+            .map(|(_, utility)| utility)
     }
 
     pub fn run(self, shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<i32> {

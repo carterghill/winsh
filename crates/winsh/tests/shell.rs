@@ -90,6 +90,66 @@ fn quote(value: impl AsRef<std::ffi::OsStr>) -> String {
     )
 }
 
+#[test]
+fn completion_uses_session_lookup_and_shell_word_boundaries() {
+    let mut fixture = Fixture::new();
+    let work = fixture.root.0.join("work");
+    let bin = work.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("native-tool.sh");
+    fs::write(&script, "echo from-script").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(bin.join("native-note.txt"), "").unwrap();
+    fs::write(work.join("café's $note[1].txt"), "contents\n").unwrap();
+    fs::write(work.join("bind.txt"), "").unwrap();
+    assert_eq!(
+        fixture
+            .run("cd work; export PATH=bin HOME=\"$PWD\"; notify() { :; }")
+            .status(),
+        0
+    );
+    let ctx = fixture.shell.completion_context();
+    let additions = |before, after| {
+        ctx.candidates(before, after)
+            .into_iter()
+            .map(|(_, insert)| insert)
+            .collect::<Vec<_>>()
+    };
+    for before in [
+        "nat",
+        "./bin/nat",
+        "pwd && nat",
+        "cd . | nat",
+        "X='a b' 2>out nat",
+        "if true; then nat",
+    ] {
+        assert_eq!(additions(before, ""), ["ive-tool.sh "], "{before}");
+    }
+    assert_eq!(additions("not", ""), ["ify "]);
+    assert_eq!(additions("gre", ""), ["p "]);
+    assert_eq!(additions("pri", "tf x"), ["n"]);
+    assert_eq!(additions("cd bi", ""), ["n/"]);
+    assert_eq!(additions("cat bi", ""), ["n/", "nd.txt "]);
+    assert_eq!(additions("echo a#b >bi", ""), ["n/", "nd.txt "]);
+    for before in ["cat 2>&", "cat # bi", "cat $(echo caf", "echo >$(echo x)/"] {
+        assert!(additions(before, "").is_empty(), "{before}");
+    }
+    for before in ["cat caf", "cat 'caf", "cat \"caf", "cat ~/caf"] {
+        let matches = additions(before, "");
+        assert_eq!(matches.len(), 1, "{before}");
+        assert_eq!(
+            fixture.run(&format!("{before}{}", matches[0])).status(),
+            0,
+            "{before}"
+        );
+    }
+    assert_eq!(fixture.out(), "contents\n".repeat(4));
+}
+
 fn helper() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
     HELPER.get_or_init(|| {

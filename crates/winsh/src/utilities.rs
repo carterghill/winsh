@@ -10,6 +10,7 @@ use same_file::Handle;
 
 use crate::{Shell, ShellIo, platform};
 
+mod files;
 mod grep;
 mod ls;
 
@@ -17,13 +18,26 @@ mod ls;
 #[derive(Clone, Copy)]
 pub enum Utility {
     Cat,
+    Cp,
     Grep,
     Ls,
+    Mkdir,
+    Mv,
+    Rm,
+    Touch,
 }
 
 impl Utility {
-    pub(crate) const COMMANDS: [(&'static str, Self); 3] =
-        [("cat", Self::Cat), ("grep", Self::Grep), ("ls", Self::Ls)];
+    pub(crate) const COMMANDS: [(&'static str, Self); 8] = [
+        ("cat", Self::Cat),
+        ("cp", Self::Cp),
+        ("grep", Self::Grep),
+        ("ls", Self::Ls),
+        ("mkdir", Self::Mkdir),
+        ("mv", Self::Mv),
+        ("rm", Self::Rm),
+        ("touch", Self::Touch),
+    ];
 
     pub fn from_name(name: &OsStr) -> Option<Self> {
         let name = name.to_str()?;
@@ -37,7 +51,7 @@ impl Utility {
         let files = match self {
             Self::Cat => cat_options(args).ok().map(|(_, _, files)| files),
             Self::Grep => grep::files(args),
-            Self::Ls => None,
+            _ => None,
         };
         files.is_some_and(|files| operands(files).any(|f| f == "-"))
     }
@@ -47,6 +61,11 @@ impl Utility {
             Self::Cat => ("cat", 1, cat(shell, args, io)),
             Self::Grep => ("grep", 2, grep::run(shell, args, io)),
             Self::Ls => ("ls", 2, ls::run(shell, args, io)),
+            Self::Mkdir => return files::run(self, "mkdir", "p", shell, args, io),
+            Self::Touch => return files::run(self, "touch", "acm", shell, args, io),
+            Self::Cp => return files::run(self, "cp", "rR", shell, args, io),
+            Self::Mv => return files::run(self, "mv", "", shell, args, io),
+            Self::Rm => return files::run(self, "rm", "frR", shell, args, io),
         };
         match result {
             Ok(status) => Ok(status),

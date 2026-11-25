@@ -236,6 +236,7 @@ fn completion_uses_session_lookup_and_shell_word_boundaries() {
     }
     assert_eq!(additions("not", ""), ["ify "]);
     assert_eq!(additions("gre", ""), ["p "]);
+    assert_eq!(additions("mkd", ""), ["ir "]);
     assert_eq!(additions("pri", "tf x"), ["n"]);
     assert_eq!(additions("cd bi", ""), ["n/"]);
     assert_eq!(additions("cat bi", ""), ["n/", "nd.txt "]);
@@ -1162,6 +1163,185 @@ fn streaming_utilities_reject_their_own_output() {
 }
 
 #[test]
+fn everyday_file_operations_work_with_session_paths_and_multiple_operands() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.root.0.join("work")).unwrap();
+    let data = b"original\0\xff\r\n";
+    fs::write(f.root.0.join("work/input"), data).unwrap();
+    for cmd in [
+        "cd work; export PATH=''",
+        "mkdir -p 'space dir/nested' backup",
+        "mkdir -p 'space dir/nested'",
+        "touch input --literal 'space dir/nested/empty'",
+        "cp input 'space dir/renamed'",
+        "printf '%s' 'replace longer contents' >target",
+        "cp input target",
+        "cp -- input --literal backup",
+        "cp -R 'space dir' backup",
+        "cp -r 'space dir/.' backup",
+        "mv 'space dir/renamed' backup/empty-name",
+        "mv backup/empty-name target",
+        "mv target TARGET",
+        "touch -- -dash",
+        "mv -- -dash --literal 'space dir'",
+        "rm -- 'space dir/-dash' 'space dir/--literal'",
+        "rm -rf 'space dir' missing",
+    ] {
+        assert_eq!(f.run(cmd).status(), 0, "{cmd}: {}", f.err());
+    }
+    let work = f.root.0.join("work");
+    for name in [
+        "input",
+        "TARGET",
+        "backup/input",
+        "backup/space dir/renamed",
+        "backup/renamed",
+    ] {
+        assert_eq!(fs::read(work.join(name)).unwrap(), data, "{name}");
+    }
+    for name in [
+        "backup/--literal",
+        "backup/space dir/nested/empty",
+        "backup/nested/empty",
+    ] {
+        assert!(work.join(name).is_file(), "{name}");
+    }
+    assert!(!work.join("space dir").exists());
+    assert!(!work.join("backup/empty-name").exists());
+    assert!(f.out().is_empty() && f.err().is_empty());
+}
+
+#[test]
+fn touch_preserves_contents_and_updates_only_the_requested_times() {
+    use std::fs::FileTimes;
+    use std::time::{Duration, UNIX_EPOCH};
+    let mut f = Fixture::new();
+    let path = f.root.0.join("data");
+    fs::write(&path, b"keep").unwrap();
+    let old = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let reset = || {
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_accessed(old).set_modified(old))
+            .unwrap()
+    };
+    reset();
+    assert_eq!(f.run("touch -a data").status(), 0, "{}", f.err());
+    let meta = fs::metadata(&path).unwrap();
+    assert!(meta.accessed().unwrap() > old);
+    assert_eq!(meta.modified().unwrap(), old);
+    reset();
+    assert_eq!(f.run("touch -m data").status(), 0);
+    let meta = fs::metadata(&path).unwrap();
+    assert_eq!(meta.accessed().unwrap(), old);
+    assert!(meta.modified().unwrap() > old);
+    assert_eq!(fs::read(&path).unwrap(), b"keep");
+    assert_eq!(
+        f.run("touch -c missing missing-dir/ && mkdir dir && touch dir")
+            .status(),
+        0,
+        "{}",
+        f.err()
+    );
+    assert!(!f.root.0.join("missing").exists());
+}
+
+#[test]
+fn file_operations_reject_unsafe_targets_and_report_operand_errors() {
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("keep"), b"unchanged").unwrap();
+    fs::hard_link(f.root.0.join("keep"), f.root.0.join("alias")).unwrap();
+    assert_eq!(f.run("mkdir tree; touch tree/marker").status(), 0);
+    for cmd in [
+        "cp keep keep",
+        "cp keep alias",
+        "mv keep alias",
+        "cp tree tree-copy",
+        "cp -r tree tree/sub",
+        "mv tree tree/sub",
+        "cp keep alias missing",
+        "mv keep alias missing",
+        "rm tree",
+        "rm keep/",
+        "rm -r tree/.",
+        "rm -r tree/..",
+        "rm -rf ''",
+        "mkdir tree",
+        "mkdir absent/sub",
+        "touch absent/sub",
+        "mv -z keep lost",
+        "mkdir",
+        "touch",
+        "cp",
+        "cp keep",
+        "mv",
+        "mv keep",
+        "rm",
+    ] {
+        assert_ne!(f.run(cmd).status(), 0, "{cmd}");
+    }
+    assert_eq!(fs::read(f.root.0.join("keep")).unwrap(), b"unchanged");
+    assert!(f.root.0.join("tree/marker").exists());
+    assert!(!f.root.0.join("tree/sub").exists());
+    assert_eq!(
+        f.run("mkdir tree created; echo $?; rm missing created-file 2>diagnostic")
+            .status(),
+        1
+    );
+    assert!(f.root.0.join("created").is_dir());
+    assert_eq!(f.out(), "1\n");
+    assert!(
+        fs::read_to_string(f.root.0.join("diagnostic"))
+            .unwrap()
+            .contains("missing")
+    );
+    assert_eq!(f.run("rm -f").status(), 0);
+    assert_eq!(f.run("cp missing keep created").status(), 1);
+    assert_eq!(
+        fs::read(f.root.0.join("created/keep")).unwrap(),
+        b"unchanged"
+    );
+    assert_eq!(f.run("mv missing alias created").status(), 1);
+    assert!(f.root.0.join("created/alias").is_file());
+}
+
+#[test]
+fn recursive_operations_respect_directory_links() {
+    let mut f = Fixture::new();
+    let root = &f.root.0;
+    fs::create_dir(root.join("real")).unwrap();
+    fs::write(root.join("real/keep"), b"keep").unwrap();
+    fs::create_dir(root.join("tree")).unwrap();
+    let link = root.join("tree/link");
+    let second = root.join("tree/second");
+    #[cfg(unix)]
+    for path in [&link, &second] {
+        std::os::unix::fs::symlink(root.join("real"), path).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // Junctions exercise Windows directory reparse points without needing
+        // the privilege required to create symbolic links.
+        let result = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference='Stop'; foreach ($path in $env:WINSH_TEST_LINK, $env:WINSH_TEST_SECOND) { New-Item -ItemType Junction -Path $path -Target $env:WINSH_TEST_TARGET | Out-Null }"])
+            .env("WINSH_TEST_LINK", &link).env("WINSH_TEST_SECOND", &second).env("WINSH_TEST_TARGET", root.join("real")).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert_eq!(f.run("cp -r real tree/link").status(), 1);
+    assert!(!f.root.0.join("real/real").exists());
+    assert_eq!(f.run("rm tree/link/").status(), 0, "{}", f.err());
+    assert!(!link.exists());
+    assert_eq!(f.run("rm -r tree").status(), 0, "{}", f.err());
+    assert_eq!(fs::read(f.root.0.join("real/keep")).unwrap(), b"keep");
+}
+
+#[test]
 fn bundled_utilities_run_in_script_files_without_path_tools() {
     let root = TempDir::new();
     let script = root.0.join("combine.sh");
@@ -1187,6 +1367,27 @@ fn bundled_utilities_run_in_script_files_without_path_tools() {
     assert!(filtered.stderr.is_empty());
     fs::write(&log, b"ok\n").unwrap();
     assert_eq!(cli(&args, b"").status.code(), Some(7));
+
+    fs::write(
+        &script,
+        r#"
+        PATH=''
+        cd "$1" && mkdir -p out/one && touch out/one/log || exit 1
+        echo saved >out/one/log
+        cp -r out/one out/two & wait "$!" || exit 2
+        mv out/two/log out/result && cat out/result && rm -rf out
+    "#,
+    )
+    .unwrap();
+    let output = cli(&[script.to_str().unwrap(), root.0.to_str().unwrap()], b"");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"saved\n");
+    assert!(!root.0.join("out").exists());
 }
 
 #[test]

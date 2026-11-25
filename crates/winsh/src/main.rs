@@ -14,7 +14,7 @@ const HELP: &str = "A native Windows shell with Bash-compatible syntax.
 Usage: winsh [--help | --version]
        winsh -c <command> [name [arguments...]]
        winsh [--] <script> [arguments...]
-       winsh --utility <cat|grep|ls> [arguments...]
+       winsh --utility <cat|cp|grep|ls|mkdir|mv|rm|touch> [arguments...]
 
 With no arguments, read commands from the terminal or standard input.
 
@@ -50,7 +50,7 @@ fn options(mut args: impl Iterator<Item = OsString>) -> Result<Mode, &'static st
                 .next()
                 .as_deref()
                 .and_then(Utility::from_name)
-                .ok_or("--utility expects cat, grep, or ls")?;
+                .ok_or("--utility expects a bundled utility name (see --help)")?;
             return Ok(Mode::Utility(utility, args.collect()));
         }
         Some("-c") => {

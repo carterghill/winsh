@@ -41,7 +41,7 @@ on the engine and launches the shell executable as a separate process.
 | `pipeline` | Starting concurrent stages, isolated built-ins, and waiting for every stage. |
 | `redirect` | Opening files and applying descriptor changes in source order. |
 | `builtins` / `language_builtins` | Navigation, script state/control, tests, and basic text I/O. |
-| `utilities` | Directory listing, file concatenation, and line filtering with session paths and standard I/O. |
+| `utilities` | Directory listings, file operations, concatenation, and line filtering with session paths and standard I/O. |
 | `platform` | Native paths, exit statuses, and process launch details. |
 | `streams` | Explicit standard I/O handles shared by built-ins and children. |
 | `console` | Executable-only console input and Windows Ctrl+C handling. |
@@ -59,7 +59,7 @@ CLI input (interactive, -c, or a script file)
     -> expand: construct arguments and redirection targets using session state
     -> streams: connect pipes and apply each stage's redirections
     -> builtins: operate on the session
-       OR utilities: run ls, cat, or grep
+       OR utilities: list, read, filter, create, copy, move, or remove files
        OR exec: launch a native program
     -> Outcome: continue or exit, with a status
 ~~~
@@ -154,9 +154,10 @@ no shell framework, async runtime, or GUI toolkit dependency.
    local variables, source, tests, read, echo, and printf. Fixed fixtures compare
    each language category against Bash. See [the language guide](shell.md#scripts-and-language)
    for exact forms, Windows differences, and advanced Bash features still pending.
-6. **Implemented subset:** bundled ls, cat, and grep support directory listings,
-   file input, redirections, and pipelines. Script tests cover concatenation and log
-   filtering. See [file utilities](shell.md#file-utilities) for options and statuses.
+6. **Implemented subset:** bundled `ls`, `cat`, and `grep` support listing and
+   filtering files. `mkdir`, `touch`, `cp`, `mv`, and `rm` cover everyday file
+   operations, including recursive copies and removals. See [file utilities](shell.md#file-utilities)
+   for options and exit statuses.
 7. **Implemented:** interactive editing, persistent history, Tab completion,
    background jobs, and foreground control. Each job runs in a separate winsh
    worker. Windows assigns the worker to a kill-on-close job object before

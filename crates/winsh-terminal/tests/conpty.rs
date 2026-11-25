@@ -263,6 +263,38 @@ fn winsh_interactive_smoke() {
 
 #[test]
 #[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_file_operations_round_trip_in_the_terminal() {
+    let work = std::path::absolute(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap()
+        .join(format!(
+            "terminal-files-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir(&work).unwrap();
+    let h = Harness::shell(Path::new(""));
+    h.enter(&format!(
+        "cd '{}' && export PATH='' && echo cwd-ready",
+        work.to_str().unwrap().replace('\'', "'\\''")
+    ));
+    h.wait_for("\ncwd-ready");
+    h.enter(
+        "mkdir -p 'project/src' && touch 'project/src/notes' && echo shipped >project/src/notes",
+    );
+    h.enter("cp -r project copy && mv copy/src/notes copy/done && cat copy/done");
+    h.wait_for("\nshipped");
+    h.enter("rm -r project copy && echo cleaned-up");
+    h.wait_for("\ncleaned-up");
+    h.enter("exit");
+    h.wait_for_exit(0);
+    std::fs::remove_dir(work).unwrap(); // Both directory trees must be gone.
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
 fn winsh_controls_foreground_and_background_jobs() {
     let h = Harness::shell(Path::new(""));
     h.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("job-" + "ready"); Start-Sleep 60' | cat"#);

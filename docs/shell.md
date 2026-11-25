@@ -184,7 +184,7 @@ console input buffer with the prompt.
 
 ## File utilities
 
-`ls`, `cat`, and `grep` are bundled with winsh. A shell function of the same name
+`ls`, `cat`, `grep`, `mkdir`, `touch`, `cp`, `mv`, and `rm` are bundled with winsh. A shell function of the same name
 takes precedence. Use an explicit path to run another version. File operands
 resolve against the shell's working directory. `cat` and `grep` read stdin when
 given no file operands or when an operand is `-`. Put options before operands
@@ -204,6 +204,20 @@ if grep -Fq 'build failed' combined.txt; then echo 'check the build log'; fi
 | `grep -e PATTERN` | Supply a pattern beginning with a dash or repeat `-e` for alternatives. Newline-separated patterns also select any match. |
 | `grep -i -v -n` | Ignore case, invert selection, or prefix each selected line with its 1-based line number. Short flags can be combined. |
 | `grep -c -q -H -h` | `-c` prints a selected-line count per file. `-q` stops at the first selected line and suppresses normal output. Multiple files get filename prefixes by default. `-H` forces prefixes and `-h` suppresses them. |
+| `mkdir [-p] DIR ...` | Create directories. `-p` also creates missing parents and accepts existing directories. |
+| `touch [-acm] PATH ...` | Create empty files or update timestamps on existing files and directories. `-a` selects access time, `-m` selects modification time, and the default updates both. `-c` skips missing files. Existing contents are preserved. |
+| `cp [-rR] SOURCE ... DEST` | Copy file contents and overwrite existing files. `-r` or `-R` copies directory trees, including empty directories. |
+| `mv SOURCE ... DEST` | Rename or move files and directories on the same filesystem. Existing destination files can be replaced. |
+| `rm [-frR] PATH ...` | Remove files. Use `-r` or `-R` for a directory tree. `-f` accepts missing operands and missing files. Removing a directory link or Windows junction removes the link itself. |
+
+For `cp` and `mv`, an existing destination directory receives each source under
+its own name. Multiple sources require a destination directory. To merge a
+directory's contents directly into another directory, use `cp -r source/. dest`.
+A recursive copy recreates symbolic links, which requires permission to create
+links on Windows. An existing link with a conflicting target produces an error.
+The five file operations are quiet on success and return status 0. An error
+produces a diagnostic on stderr and status 1. They continue with later operands
+after an individual operand fails.
 
 `ls` exits with 0 on success, 1 for an error reading a directory entry, and 2 for an invalid option, inaccessible operand, or output error.
 `cat` exits with 0 on success and 1 on error. `grep` exits with 0 if it selects

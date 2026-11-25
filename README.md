@@ -75,8 +75,9 @@ program.exe |& findstr.exe error
 See [redirections and pipelines](docs/shell.md#redirections-and-pipelines) for
 descriptor handling, exit statuses, and the supported subset.
 
-`ls`, `cat`, and `grep` ship inside `winsh.exe`. Use them at the prompt or in a script,
-or run `cargo run -- --utility grep -in windows README.md` from PowerShell.
+`ls`, `cat`, `grep`, `mkdir`, `touch`, `cp`, `mv`, and `rm` ship inside
+`winsh.exe`. Use them at the prompt or in a script, or run
+`cargo run -- --utility grep -in windows README.md` from PowerShell.
 See the [utility options and exit statuses](docs/shell.md#file-utilities).
 
 Scripts use the same engine as the prompt. For example:

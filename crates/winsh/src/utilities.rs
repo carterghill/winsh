@@ -50,7 +50,7 @@ impl Utility {
     pub(crate) fn reads_stdin(self, args: &[OsString]) -> bool {
         let files = match self {
             Self::Cat => cat_options(args).ok().map(|(_, _, files)| files),
-            Self::Grep => grep::files(args),
+            Self::Grep => return grep::reads_stdin(args),
             _ => None,
         };
         files.is_some_and(|files| operands(files).any(|f| f == "-"))

@@ -154,10 +154,10 @@ no shell framework, async runtime, or GUI toolkit dependency.
    local variables, source, tests, read, echo, and printf. Fixed fixtures compare
    each language category against Bash. See [the language guide](shell.md#scripts-and-language)
    for exact forms, Windows differences, and advanced Bash features still pending.
-6. **Implemented subset:** bundled `ls`, `cat`, and `grep` support listing and
-   filtering files. `mkdir`, `touch`, `cp`, `mv`, and `rm` cover everyday file
-   operations, including recursive copies and removals. See [file utilities](shell.md#file-utilities)
-   for options and exit statuses.
+6. **Implemented.** The bundled utilities cover directory listings, concatenation,
+   recursive text search, and everyday file operations. `mv` handles files and
+   directory trees across drives. See [file utilities](shell.md#file-utilities)
+   for the supported options and exit statuses.
 7. **Implemented:** interactive editing, persistent history, Tab completion,
    background jobs, and foreground control. Each job runs in a separate winsh
    worker. Windows assigns the worker to a kill-on-close job object before

@@ -1,10 +1,12 @@
 use super::{open_input, operands, output_id};
-use crate::{Shell, ShellIo};
+use crate::{Shell, ShellIo, platform};
 use regex::bytes::{RegexSet, RegexSetBuilder};
 use std::{
     ffi::{OsStr, OsString},
     io::{self, BufRead, BufReader},
+    path::Path,
 };
+use walkdir::WalkDir;
 
 #[derive(Default, PartialEq)]
 enum Syntax {
@@ -22,6 +24,7 @@ struct Options {
     invert: bool,
     count: bool,
     quiet: bool,
+    recursive: bool,
     filenames: Option<bool>,
 }
 
@@ -50,6 +53,7 @@ impl Options {
                     'v' => options.invert = true,
                     'c' => options.count = true,
                     'q' => options.quiet = true,
+                    'r' => options.recursive = true,
                     'H' => options.filenames = Some(true),
                     'h' => options.filenames = Some(false),
                     'E' if options.syntax != Syntax::Fixed => options.syntax = Syntax::Extended,
@@ -98,8 +102,10 @@ impl Options {
     }
 }
 
-pub(super) fn files(args: &[OsString]) -> Option<&[OsString]> {
-    Options::parse(args).ok().map(|(_, _, files)| files)
+pub(super) fn reads_stdin(args: &[OsString]) -> bool {
+    Options::parse(args).is_ok_and(|(opts, _, files)| {
+        (files.is_empty() && !opts.recursive) || files.iter().any(|f| f == "-")
+    })
 }
 
 // Translate the POSIX spelling of literals and BRE operators for the regex engine.
@@ -174,58 +180,154 @@ pub(super) fn run(shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Res
     } else {
         output_id(io)?
     };
-    let prefix = options.filenames.unwrap_or(files.len() > 1);
-    let mut any_selected = false;
-    let mut failed = false;
-    let mut line = Vec::new();
+    let implicit_directory = options.recursive && files.is_empty();
+    let cwd = [OsString::from(".")];
+    let files = if implicit_directory { &cwd[..] } else { files };
+    let mut search = Search {
+        options,
+        regex,
+        output,
+        matched: false,
+        failed: false,
+        line: Vec::new(),
+    };
     for name in operands(files) {
-        let label = if name == "-" {
-            OsStr::new("(standard input)")
+        let root = if search.options.recursive && name != "-" {
+            platform::absolute(shell.cwd(), Path::new(name))
+                .ok()
+                .filter(|p| p.is_dir())
         } else {
-            name
+            None
         };
-        let input = match open_input(shell, io, name, output.as_ref()) {
+        if let Some(root) = root {
+            let walk = WalkDir::new(&root)
+                .min_depth(1)
+                .sort_by_file_name()
+                .into_iter();
+            #[cfg(windows)]
+            let walk = walk.filter_entry(|entry| {
+                // WalkDir caches directory metadata on Windows. Also skip
+                // non-symlink directory reparse points.
+                !entry.file_type().is_dir()
+                    || entry
+                        .metadata()
+                        .is_ok_and(|m| !super::files::directory_reparse_point(&m))
+            });
+            for entry in walk {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        io.err(format_args!("grep: {error}\n"))?;
+                        search.failed = true;
+                        continue;
+                    }
+                };
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .expect("walk is rooted at this operand");
+                let mut label = if implicit_directory {
+                    String::new()
+                } else {
+                    name.to_string_lossy().into_owned()
+                };
+                for part in relative.iter() {
+                    if !label.is_empty() && !label.ends_with(std::path::is_separator) {
+                        label.push('/');
+                    }
+                    label.push_str(&part.to_string_lossy());
+                }
+                search.file(shell, io, entry.path().as_os_str(), &label, true)?;
+                if search.options.quiet && search.matched {
+                    return Ok(0);
+                }
+            }
+        } else {
+            let label = if name == "-" {
+                "(standard input)".into()
+            } else {
+                name.to_string_lossy()
+            };
+            search.file(shell, io, name, &label, files.len() > 1)?;
+            if search.options.quiet && search.matched {
+                return Ok(0);
+            }
+        }
+    }
+    io.output().flush()?;
+    Ok(if search.failed {
+        2
+    } else {
+        i32::from(!search.matched)
+    })
+}
+
+struct Search {
+    options: Options,
+    regex: RegexSet,
+    output: Option<same_file::Handle>,
+    matched: bool,
+    failed: bool,
+    line: Vec<u8>,
+}
+
+impl Search {
+    fn file(
+        &mut self,
+        shell: &Shell,
+        io: &mut ShellIo,
+        name: &OsStr,
+        label: &str,
+        default_prefix: bool,
+    ) -> io::Result<()> {
+        let options = &self.options;
+        let prefix = options.filenames.unwrap_or(default_prefix);
+        let input = match open_input(shell, io, name, self.output.as_ref()) {
             Ok(input) => input,
             Err(error) => {
-                io.err(format_args!("grep: {}: {error}\n", label.to_string_lossy()))?;
-                failed = true;
-                continue;
+                io.err(format_args!("grep: {label}: {error}\n"))?;
+                self.failed = true;
+                return Ok(());
             }
         };
         let mut input = BufReader::new(input);
         let mut selected = 0u64;
         let mut line_number = 0u64;
+        let line = &mut self.line;
         loop {
             line.clear();
-            match input.read_until(b'\n', &mut line) {
+            match input.read_until(b'\n', line) {
                 Ok(0) => break,
                 Ok(_) => line_number += 1,
                 Err(error) => {
-                    io.err(format_args!("grep: {}: {error}\n", label.to_string_lossy()))?;
-                    failed = true;
+                    io.err(format_args!("grep: {label}: {error}\n"))?;
+                    self.failed = true;
                     break;
                 }
             }
             let text = line
                 .strip_suffix(b"\r\n")
                 .or_else(|| line.strip_suffix(b"\n"))
-                .unwrap_or(&line);
-            if regex.is_match(text) == options.invert {
+                .unwrap_or(line);
+            if self.regex.is_match(text) == options.invert {
                 continue;
             }
-            any_selected = true;
+            self.matched = true;
             if options.quiet {
-                return Ok(0);
+                return Ok(());
             }
             selected += 1;
             if !options.count {
                 if prefix {
-                    write!(io.output(), "{}:", label.to_string_lossy())?;
+                    write!(io.output(), "{label}:")?;
                 }
                 if options.numbered {
                     write!(io.output(), "{line_number}:")?;
                 }
-                io.output().write_all(&line)?;
+                io.output().write_all(line)?;
                 if !line.ends_with(b"\n") {
                     io.output().write_all(b"\n")?;
                 }
@@ -233,11 +335,10 @@ pub(super) fn run(shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Res
         }
         if options.count {
             if prefix {
-                write!(io.output(), "{}:", label.to_string_lossy())?;
+                write!(io.output(), "{label}:")?;
             }
             writeln!(io.output(), "{selected}")?;
         }
+        Ok(())
     }
-    io.output().flush()?;
-    Ok(if failed { 2 } else { i32::from(!any_selected) })
 }

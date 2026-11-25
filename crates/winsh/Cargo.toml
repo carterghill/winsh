@@ -10,6 +10,8 @@ description = "A native Windows shell with Bash-compatible syntax."
 regex = "1"
 rustyline = { version = "17", default-features = false, features = ["with-file-history", "custom-bindings"] }
 same-file = "1"
+tempfile = { version = "3.26", default-features = false }
+walkdir = "2.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 
@@ -17,7 +19,8 @@ serde_json = { version = "1", features = ["unbounded_depth"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_JobObjects", "Win32_System_Threading"] }
+winapi-util = "0.1"
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

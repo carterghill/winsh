@@ -150,11 +150,17 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace --all-targets
 ~~~
 
-The shell uses `regex` for grep patterns and `same-file` to identify aliased
-input and output files. On Windows, `windows-sys` handles console input,
+The shell uses `regex` for grep patterns, `walkdir` for directory traversal,
+`same-file` to identify aliased paths, and `tempfile` to stage cross-drive moves.
+On Windows, `windows-sys` handles console input,
 Ctrl+C and suppressing OS error dialogs during process launch. The
 terminal uses `windows-sys` for its native window, GDI rendering, and ConPTY,
 and `vt100` for terminal parsing and screen state.
+
+To exercise `mv` across two real filesystems, point `WINSH_TEST_OTHER_VOLUME`
+at a writable directory on a different volume from Cargo's target directory.
+Run `cargo test --locked -p winsh --test shell mv_between_real_filesystems -- --ignored`.
+The ordinary suite also exercises the copy and cleanup paths on a single volume.
 
 Tests cover parsing, session state, directory links, exact native arguments,
 Unicode, environment, streaming I/O, and exit statuses. Windows link tests use

@@ -186,13 +186,15 @@ console input buffer with the prompt.
 
 `ls`, `cat`, `grep`, `mkdir`, `touch`, `cp`, `mv`, and `rm` are bundled with winsh. A shell function of the same name
 takes precedence. Use an explicit path to run another version. File operands
-resolve against the shell's working directory. `cat` and `grep` read stdin when
-given no file operands or when an operand is `-`. Put options before operands
+resolve against the shell's working directory. An operand of `-` selects stdin
+for `cat` and `grep`. With no file operands, `grep -r` searches the working
+directory. Ordinary `grep` and `cat` read stdin. Put options before operands
 and use `--` to end option parsing.
 
 ~~~sh
 cat -- 'part one.txt' - 'part three.txt' <middle.txt >combined.txt
 grep -inE '^(warn|error)' combined.txt
+grep -rin error logs
 if grep -Fq 'build failed' combined.txt; then echo 'check the build log'; fi
 ~~~
 
@@ -204,10 +206,11 @@ if grep -Fq 'build failed' combined.txt; then echo 'check the build log'; fi
 | `grep -e PATTERN` | Supply a pattern beginning with a dash or repeat `-e` for alternatives. Newline-separated patterns also select any match. |
 | `grep -i -v -n` | Ignore case, invert selection, or prefix each selected line with its 1-based line number. Short flags can be combined. |
 | `grep -c -q -H -h` | `-c` prints a selected-line count per file. `-q` stops at the first selected line and suppresses normal output. Multiple files get filename prefixes by default. `-H` forces prefixes and `-h` suppresses them. |
+| `grep -r PATTERN [PATH ...]` | Search files under each directory, including hidden files. Directory matches show filenames by default. A link or junction named on the command line is followed. Links encountered inside a directory are skipped. |
 | `mkdir [-p] DIR ...` | Create directories. `-p` also creates missing parents and accepts existing directories. |
 | `touch [-acm] PATH ...` | Create empty files or update timestamps on existing files and directories. `-a` selects access time, `-m` selects modification time, and the default updates both. `-c` skips missing files. Existing contents are preserved. |
 | `cp [-rR] SOURCE ... DEST` | Copy file contents and overwrite existing files. `-r` or `-R` copies directory trees, including empty directories. |
-| `mv SOURCE ... DEST` | Rename or move files and directories on the same filesystem. Existing destination files can be replaced. |
+| `mv SOURCE ... DEST` | Rename or move files and directories, including between drives. Existing destination files can be replaced. |
 | `rm [-frR] PATH ...` | Remove files. Use `-r` or `-R` for a directory tree. `-f` accepts missing operands and missing files. Removing a directory link or Windows junction removes the link itself. |
 
 For `cp` and `mv`, an existing destination directory receives each source under
@@ -218,6 +221,13 @@ links on Windows. An existing link with a conflicting target produces an error.
 The five file operations are quiet on success and return status 0. An error
 produces a diagnostic on stderr and status 1. They continue with later operands
 after an individual operand fails.
+
+For a cross-drive move, winsh builds a temporary copy on the destination
+filesystem and renames it into place after the copy succeeds. A copy failure
+leaves the source and existing destination intact. If removing the original
+fails afterward, the command returns 1 and identifies the remaining source
+entry. A forced process exit during copying can leave a temporary directory
+named `.winsh-mv-*` beside the intended destination.
 
 `ls` exits with 0 on success, 1 for an error reading a directory entry, and 2 for an invalid option, inaccessible operand, or output error.
 `cat` exits with 0 on success and 1 on error. `grep` exits with 0 if it selects
@@ -230,8 +240,8 @@ produces an error. Shell redirections take effect before the utility starts.
 `grep` processes one line at a time, treats LF and CRLF as line endings for
 matching, preserves selected bytes, and appends LF to a selected unterminated
 last line. Patterns are UTF-8 and `-i` uses Unicode case folding. Binary data
-uses the same line rules. Backreferences, locale-specific collation, recursion
-through directories, and GNU long options are outside this subset.
+uses the same line rules. Backreferences, locale-specific collation, and GNU
+long options are outside this subset.
 
 The interactive Windows shell runs a utility as a foreground child so Ctrl+C
 returns to the prompt. PowerShell can invoke the same implementation directly

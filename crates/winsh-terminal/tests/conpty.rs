@@ -284,8 +284,8 @@ fn winsh_file_operations_round_trip_in_the_terminal() {
     h.enter(
         "mkdir -p 'project/src' && touch 'project/src/notes' && echo shipped >project/src/notes",
     );
-    h.enter("cp -r project copy && mv copy/src/notes copy/done && cat copy/done");
-    h.wait_for("\nshipped");
+    h.enter("cp -r project copy && mv copy/src/notes copy/done && grep -rn shipped copy");
+    h.wait_for("\ncopy/done:1:shipped");
     h.enter("rm -r project copy && echo cleaned-up");
     h.wait_for("\ncleaned-up");
     h.enter("exit");

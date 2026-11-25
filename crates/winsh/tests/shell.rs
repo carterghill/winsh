@@ -1094,6 +1094,46 @@ fn cat_streams_binary_data_and_numbers_across_operands() {
 }
 
 #[test]
+fn recursive_grep_handles_files_directories_stdin_and_statuses() {
+    let mut f = Fixture::new();
+    fs::create_dir_all(f.root.0.join("logs/nested")).unwrap();
+    fs::write(f.root.0.join("logs/nested/-"), b"no\nERROR deep\r\n").unwrap();
+    fs::write(f.root.0.join("logs/.hidden"), b"error first\n").unwrap();
+    fs::write(f.root.0.join("logs/empty"), b"").unwrap();
+    assert_eq!(f.run("grep -rin error logs").status(), 0, "{}", f.err());
+    assert_eq!(
+        f.out(),
+        "logs/.hidden:1:error first\nlogs/nested/-:2:ERROR deep\r\n"
+    );
+    assert_eq!(f.run("cd logs; grep -ric error >../counts").status(), 0);
+    assert_eq!(
+        fs::read(f.root.0.join("counts")).unwrap(),
+        b".hidden:1\nempty:0\nnested/-:1\n"
+    );
+    assert_eq!(
+        f.run("echo piped | grep -rh -e piped -e ERROR - nested >../mixed")
+            .status(),
+        0
+    );
+    assert_eq!(
+        fs::read(f.root.0.join("mixed")).unwrap(),
+        b"piped\nERROR deep\r\n"
+    );
+    assert_eq!(f.run("grep -r missing-pattern .").status(), 1);
+    assert_eq!(f.run("grep -r ERROR absent nested >../found").status(), 2);
+    assert_eq!(
+        fs::read(f.root.0.join("found")).unwrap(),
+        b"nested/-:ERROR deep\r\n"
+    );
+    assert_eq!(f.run("grep -rq ERROR absent nested").status(), 0);
+    assert_eq!(f.run("grep -r ERROR nested/- >../single").status(), 0);
+    assert_eq!(
+        fs::read(f.root.0.join("single")).unwrap(),
+        b"ERROR deep\r\n"
+    );
+}
+
+#[test]
 fn grep_selects_lines_counts_files_and_preserves_statuses() {
     let mut f = Fixture::new();
     fs::write(f.root.0.join("one"), b"ok\r\nError 42\r\nwarning\nError+").unwrap();
@@ -1160,6 +1200,39 @@ fn streaming_utilities_reject_their_own_output() {
     }
     fs::write(f.root.0.join("input"), b"match\n").unwrap();
     assert_eq!(f.run("grep -q match input >>alias").status(), 0);
+}
+
+#[test]
+#[ignore = "set WINSH_TEST_OTHER_VOLUME to a writable directory on a second filesystem"]
+fn mv_between_real_filesystems() {
+    let mut f = Fixture::new();
+    let other =
+        tempfile::tempdir_in(env::var_os("WINSH_TEST_OTHER_VOLUME").expect("second volume"))
+            .unwrap();
+    let probe = f.root.0.join("probe");
+    fs::write(&probe, b"probe").unwrap();
+    let error =
+        fs::rename(probe, other.path().join("probe")).expect_err("choose different filesystems");
+    assert_eq!(error.kind(), std::io::ErrorKind::CrossesDevices);
+    let dest = quote(other.path());
+    assert_eq!(
+        f.run("mkdir -p tree/sub; echo moved >tree/sub/file; echo new >plain")
+            .status(),
+        0
+    );
+    fs::write(other.path().join("plain"), b"old").unwrap();
+    assert_eq!(
+        f.run(&format!("mv tree plain {dest}")).status(),
+        0,
+        "{}",
+        f.err()
+    );
+    assert!(!f.root.0.join("tree").exists() && !f.root.0.join("plain").exists());
+    assert_eq!(
+        fs::read(other.path().join("tree/sub/file")).unwrap(),
+        b"moved\n"
+    );
+    assert_eq!(fs::read(other.path().join("plain")).unwrap(), b"new\n");
 }
 
 #[test]
@@ -1335,6 +1408,9 @@ fn recursive_operations_respect_directory_links() {
     }
     assert_eq!(f.run("cp -r real tree/link").status(), 1);
     assert!(!f.root.0.join("real/real").exists());
+    assert_eq!(f.run("grep -r keep tree").status(), 1);
+    assert_eq!(f.run("grep -r keep tree/link").status(), 0, "{}", f.err());
+    assert_eq!(f.out(), "tree/link/keep:keep\n");
     assert_eq!(f.run("rm tree/link/").status(), 0, "{}", f.err());
     assert!(!link.exists());
     assert_eq!(f.run("rm -r tree").status(), 0, "{}", f.err());

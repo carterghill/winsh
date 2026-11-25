@@ -1,6 +1,7 @@
 use super::Utility;
 use crate::{Shell, ShellIo, platform};
 use same_file::Handle;
+mod move_tree;
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, FileTimes, Metadata},
@@ -251,7 +252,12 @@ fn move_entry(source: &Path, target: &Path) -> io::Result<()> {
             return Err(io::Error::other("source and destination are the same file"));
         }
     }
-    fs::rename(source, target)
+    match fs::rename(source, target) {
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            move_tree::move_across(source, target)
+        }
+        result => result,
+    }
 }
 
 fn remove(path: &Path, recursive: bool) -> io::Result<()> {
@@ -281,7 +287,7 @@ fn remove(path: &Path, recursive: bool) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn directory_reparse_point(meta: &Metadata) -> bool {
+pub(super) fn directory_reparse_point(meta: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -329,22 +335,7 @@ fn copy_entry(
             Err(e) => return Err(e),
         };
         let parent = target.parent().unwrap_or(target);
-        let physical = fs::canonicalize(if existing { target } else { parent })?;
-        let original = fs::canonicalize(source)?;
-        // Canonicalization resolves junctions and '..'. Check the directory
-        // at the matching depth too, for alternate spellings on Windows.
-        let depth = original.components().count();
-        let peer = physical
-            .ancestors()
-            .find(|p| p.components().count() == depth);
-        if physical.starts_with(&original)
-            || peer
-                .map(|p| same_file::is_same_file(p, &original))
-                .transpose()?
-                .unwrap_or(false)
-        {
-            return Err(io::Error::other("cannot copy a directory into itself"));
-        }
+        reject_descendant(source, if existing { target } else { parent })?;
         if !existing {
             fs::create_dir(target)?;
         }
@@ -358,6 +349,27 @@ fn copy_entry(
         return Err(io::Error::other("source is not a regular file"));
     }
     copy_file(source, target, &meta)
+}
+
+fn reject_descendant(source: &Path, directory: &Path) -> io::Result<()> {
+    let physical = fs::canonicalize(directory)?;
+    let original = fs::canonicalize(source)?;
+    // Junctions, '..', and case aliases can name the source through another path.
+    let depth = original.components().count();
+    let peer = physical
+        .ancestors()
+        .find(|p| p.components().count() == depth);
+    if physical.starts_with(&original)
+        || peer
+            .map(|p| same_file::is_same_file(p, &original))
+            .transpose()?
+            .unwrap_or(false)
+    {
+        return Err(io::Error::other(
+            "destination is inside the source directory",
+        ));
+    }
+    Ok(())
 }
 
 fn copy_file(source: &Path, target: &Path, meta: &Metadata) -> io::Result<()> {

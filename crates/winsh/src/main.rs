@@ -132,7 +132,7 @@ fn run() -> io::Result<i32> {
                 arguments.remove(0)
             };
             shell.set_arguments(arg0, arguments);
-            Ok(shell.run(&source, &mut streams)?.status())
+            Ok(shell.run_command_string(&source, &mut streams)?.status())
         }
         Mode::Script(file, arguments) => {
             let source = match std::fs::read_to_string(&file) {

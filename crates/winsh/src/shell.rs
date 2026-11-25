@@ -34,6 +34,14 @@ pub(crate) enum Flow {
 pub(crate) struct SavedVariable {
     value: Option<OsString>,
     exported: Option<OsString>,
+    export_on_assignment: bool,
+}
+
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ShellOptions {
+    pub errexit: bool,
+    pub nounset: bool,
+    pub pipefail: bool,
 }
 
 /// Explicit session state; the engine never changes the host cwd or environment.
@@ -43,6 +51,9 @@ pub struct Shell {
     pub(crate) jobs: crate::jobs::Jobs,
     pub(crate) cwd: PathBuf,
     pub(crate) environment: Vec<(OsString, OsString)>,
+    pub(crate) unassigned_exports: Vec<OsString>,
+    pub(crate) options: ShellOptions,
+    pub(crate) ignore_errexit: bool,
     pub(crate) variables: BTreeMap<String, OsString>,
     pub(crate) functions: BTreeMap<String, Command>,
     pub(crate) aliases: BTreeMap<String, crate::aliases::Alias>,
@@ -58,6 +69,7 @@ pub struct Shell {
     pub(crate) utility_executable: Option<PathBuf>,
     capture_depth: usize,
     script_depth: usize,
+    command_string: bool,
     abort_script: bool,
     pub(crate) last_status: i32,
 }
@@ -81,6 +93,9 @@ impl Shell {
             jobs: Default::default(),
             cwd,
             environment: environment.into_iter().collect(),
+            unassigned_exports: Vec::new(),
+            options: Default::default(),
+            ignore_errexit: false,
             variables: BTreeMap::new(),
             functions: BTreeMap::new(),
             aliases: BTreeMap::new(),
@@ -94,6 +109,7 @@ impl Shell {
             substitution_status: None,
             capture_depth: 0,
             script_depth: 0,
+            command_string: false,
             abort_script: false,
             cancellation: None,
             utility_executable: None,
@@ -162,6 +178,20 @@ impl Shell {
                 Ok(self.record(Outcome::Continue(2)))
             }
         }
+    }
+    /// Run noninteractive -c input, including Bash's top-level nounset status.
+    pub fn run_command_string(&mut self, source: &str, io: &mut ShellIo) -> io::Result<Outcome> {
+        self.command_string = true;
+        let result = self.run(source, io);
+        self.command_string = false;
+        result
+    }
+
+    pub(crate) fn subshell(&self) -> Self {
+        let mut child = self.clone();
+        child.flow = None;
+        child.command_string = false;
+        child
     }
     pub fn execute(
         &mut self,
@@ -243,13 +273,38 @@ impl Shell {
                 {
                     continue;
                 }
-                outcome = self.evaluate_pipeline(pipeline, io)?;
+                outcome = self.with_errexit_ignored(
+                    index < list.operators.len() || pipeline.negated,
+                    |shell| shell.evaluate_pipeline(pipeline, io),
+                )?;
                 if matches!(outcome, Outcome::Exit(_)) || self.flow.is_some() || self.abort_script {
                     return Ok(outcome);
                 }
             }
         }
         Ok(outcome)
+    }
+    fn with_errexit_ignored(
+        &mut self,
+        ignore: bool,
+        run: impl FnOnce(&mut Self) -> io::Result<Outcome>,
+    ) -> io::Result<Outcome> {
+        let previous = self.ignore_errexit;
+        self.ignore_errexit |= ignore;
+        let result = run(self);
+        self.ignore_errexit = previous;
+        result
+    }
+    fn check_errexit(&self, outcome: Outcome) -> Outcome {
+        if self.options.errexit
+            && !self.ignore_errexit
+            && self.flow.is_none()
+            && outcome.status() != 0
+        {
+            Outcome::Exit(outcome.status())
+        } else {
+            outcome
+        }
     }
     pub(crate) fn evaluate_pipeline(
         &mut self,
@@ -263,12 +318,13 @@ impl Shell {
         }
         if self.jobs.interactive && pipeline.uses_subshell() {
             // The worker evaluates the full pipeline, including its negation.
-            return self.launch_pipeline(pipeline, io);
+            let outcome = self.launch_pipeline(pipeline, io)?;
+            return Ok(self.check_errexit(outcome));
         }
         let outcome = if pipeline.commands.len() == 1 {
             self.command(&pipeline.commands[0], io, false)?
         } else {
-            Outcome::Continue(pipeline::run(self, pipeline, io)?)
+            self.check_errexit(Outcome::Continue(pipeline::run(self, pipeline, io)?))
         };
         let outcome = if pipeline.negated && matches!(outcome, Outcome::Continue(_)) {
             Outcome::Continue(i32::from(outcome.status() == 0))
@@ -286,9 +342,10 @@ impl Shell {
         let mut streams = io.try_clone()?;
         let result = if let CommandKind::Simple(simple) = &command.kind {
             self.simple(simple, &mut streams, pipe_stderr)
+                .map(|outcome| self.check_errexit(outcome))
         } else {
             match redirect::apply(self, &command.redirections, &mut streams)? {
-                Some(failure) => Ok(failure),
+                Some(failure) => Ok(self.check_errexit(failure)),
                 None => {
                     if pipe_stderr {
                         streams.duplicate(2, 1)?;
@@ -306,7 +363,7 @@ impl Shell {
                 ) =>
             {
                 let _ = streams.err(format_args!("winsh: {error}\n"));
-                Ok(self.record(Outcome::Continue(1)))
+                Ok(self.record(self.check_errexit(Outcome::Continue(1))))
             }
             Err(error) => Err(error),
         }
@@ -318,7 +375,16 @@ impl Shell {
     ) -> io::Result<Outcome> {
         self.abort_script = true;
         io.err(format_args!("winsh: {error}\n"))?;
-        Ok(Outcome::Continue(2))
+        Ok(match error.cause {
+            expand::ExpansionFailure::Unbound(_)
+                if self.command_string && self.source_depth == 0 =>
+            {
+                Outcome::Exit(127)
+            }
+            expand::ExpansionFailure::Unbound(_) if !self.jobs.interactive => Outcome::Exit(1),
+            expand::ExpansionFailure::Unbound(_) => Outcome::Continue(1),
+            expand::ExpansionFailure::Invalid(_) => Outcome::Continue(2),
+        })
     }
     fn simple(
         &mut self,
@@ -357,13 +423,15 @@ impl Shell {
             Ok(p) => p,
             Err(error) => return self.expansion_failure(error, io),
         };
-        if let Some(failure) = redirect::apply(self, &simple.redirections, io)? {
-            return Ok(failure);
-        }
-        if pipe_stderr {
-            io.duplicate(2, 1)?;
-        }
         let temporary = !arguments.is_empty();
+        if temporary {
+            if let Some(failure) = redirect::apply(self, &simple.redirections, io)? {
+                return Ok(failure);
+            }
+            if pipe_stderr {
+                io.duplicate(2, 1)?;
+            }
+        }
         let mut saved = BTreeMap::new();
         for (name, word, append) in assignments {
             if temporary {
@@ -374,12 +442,10 @@ impl Shell {
             let value = match expand::scalar(&word, self, io) {
                 Ok(value) => value,
                 Err(error) => {
-                    self.abort_script = true;
                     for (name, value) in saved {
                         self.restore_var(&name, value);
                     }
-                    io.err(format_args!("winsh: {error}\n"))?;
-                    return Ok(Outcome::Continue(2));
+                    return self.expansion_failure(error, io);
                 }
             };
             let mut joined = if append {
@@ -394,6 +460,9 @@ impl Shell {
             } else {
                 self.set_var(&name, joined);
             }
+        }
+        if !temporary && let Some(failure) = redirect::apply(self, &simple.redirections, io)? {
+            return Ok(failure);
         }
         let outcome = self.invoke(&arguments, io);
         for (name, value) in saved {
@@ -458,16 +527,16 @@ impl Shell {
                 body,
                 subshell: true,
             } => {
-                let mut child = self.clone();
-                child.flow = None;
-                Ok(Outcome::Continue(child.execute_script(body, io)?.status()))
+                let mut child = self.subshell();
+                Ok(self.check_errexit(Outcome::Continue(child.execute_script(body, io)?.status())))
             }
             CommandKind::If {
                 branches,
                 otherwise,
             } => {
                 for (condition, body) in branches {
-                    let result = self.execute_script(condition, io)?;
+                    let result = self
+                        .with_errexit_ignored(true, |shell| shell.execute_script(condition, io))?;
                     if matches!(result, Outcome::Exit(_))
                         || self.flow.is_some()
                         || self.abort_script
@@ -531,9 +600,7 @@ impl Shell {
                         match expand::fields(word, self, io, true) {
                             Ok(fields) => values.extend(fields),
                             Err(e) => {
-                                self.abort_script = true;
-                                io.err(format_args!("winsh: {e}\n"))?;
-                                return Ok(Outcome::Continue(2));
+                                return self.expansion_failure(e, io);
                             }
                         }
                     }
@@ -565,7 +632,9 @@ impl Shell {
                 let result = (|| {
                     let mut outcome = Outcome::Continue(0);
                     loop {
-                        let test = self.execute_script(condition, io)?;
+                        let test = self.with_errexit_ignored(true, |shell| {
+                            shell.execute_script(condition, io)
+                        })?;
                         if matches!(test, Outcome::Exit(_))
                             || self.flow.is_some()
                             || self.abort_script
@@ -625,18 +694,31 @@ impl Shell {
         let (mut reader, writer) = io::pipe()?;
         let mut io = streams.try_clone()?;
         io.set(1, Stream::Writer(writer))?;
-        let mut child = self.clone();
-        child.flow = None;
+        let mut child = self.subshell();
         child.capture_depth += 1;
         child.script_depth = 0;
         child.abort_script = false;
+        // Bash clears -e in command substitutions; their caller observes the final status.
+        child.options.errexit = false;
         thread::scope(|scope| {
             let collector = scope.spawn(move || {
                 let mut bytes = Vec::new();
                 reader.read_to_end(&mut bytes)?;
                 Ok::<_, io::Error>(bytes)
             });
-            let outcome = child.run(source, &mut io);
+            let outcome = match syntax::parse_script(source) {
+                Ok(script) => {
+                    if let Some(redirect) = substitution_input(&script) {
+                        child.read_substitution(redirect, &mut io)
+                    } else {
+                        child.execute_script(&script, &mut io)
+                    }
+                }
+                Err(error) => {
+                    io.err(format_args!("winsh: {error}\n"))?;
+                    Ok(Outcome::Continue(2))
+                }
+            };
             drop(io);
             let mut bytes = collector
                 .join()
@@ -658,6 +740,22 @@ impl Shell {
             })?;
             Ok((text.into(), outcome?.status()))
         })
+    }
+    fn read_substitution(
+        &mut self,
+        redirect: &syntax::Redirection,
+        io: &mut ShellIo,
+    ) -> io::Result<Outcome> {
+        if let Some(failure) = redirect::apply(self, std::slice::from_ref(redirect), io)? {
+            return Ok(failure);
+        }
+        match io::copy(&mut io.input_file()?, io.output()) {
+            Ok(_) => Ok(Outcome::Continue(0)),
+            Err(error) => {
+                io.err(format_args!("winsh: {error}\n"))?;
+                Ok(Outcome::Continue(1))
+            }
+        }
     }
     pub fn interrupt(&mut self) {
         self.last_status = 130;
@@ -685,12 +783,14 @@ impl Shell {
         })
     }
     pub(crate) fn set_env(&mut self, name: &str, value: OsString) {
+        self.unassigned_exports
+            .retain(|key| !platform::env_name_eq(key, name));
         self.environment
             .retain(|(key, _)| !platform::env_name_eq(key, name));
         self.environment.push((name.into(), value));
     }
     pub(crate) fn set_var(&mut self, name: &str, value: OsString) {
-        if self.env(name).is_some() {
+        if self.env(name).is_some() || self.export_on_assignment(name) {
             self.set_env(name, value);
             self.variables.remove(name);
         } else {
@@ -698,14 +798,30 @@ impl Shell {
         }
     }
     pub(crate) fn unset(&mut self, name: &str) {
+        self.unassigned_exports
+            .retain(|key| !platform::env_name_eq(key, name));
         self.variables.remove(name);
         self.environment
             .retain(|(key, _)| !platform::env_name_eq(key, name));
+    }
+    pub(crate) fn export_on_assignment(&self, name: &str) -> bool {
+        self.unassigned_exports
+            .iter()
+            .any(|key| platform::env_name_eq(key, name))
+    }
+    pub(crate) fn export_var(&mut self, name: &str) {
+        if let Some(value) = self.var(name).map(OsStr::to_owned) {
+            self.variables.remove(name);
+            self.set_env(name, value);
+        } else if !self.export_on_assignment(name) {
+            self.unassigned_exports.push(name.into());
+        }
     }
     pub(crate) fn save_var(&self, name: &str) -> SavedVariable {
         SavedVariable {
             value: self.variables.get(name).cloned(),
             exported: self.env(name).map(OsStr::to_owned),
+            export_on_assignment: self.export_on_assignment(name),
         }
     }
     pub(crate) fn restore_var(&mut self, name: &str, saved: SavedVariable) {
@@ -715,6 +831,8 @@ impl Shell {
         }
         if let Some(v) = saved.exported {
             self.set_env(name, v);
+        } else if saved.export_on_assignment {
+            self.unassigned_exports.push(name.into());
         }
     }
     pub(crate) fn parameter_is_set(&self, name: &str) -> bool {
@@ -722,8 +840,10 @@ impl Shell {
             true
         } else if let Ok(n) = name.parse::<usize>() {
             n > 0 && n <= self.positional.len()
+        } else if matches!(name, "@" | "*") {
+            !self.positional.is_empty()
         } else {
-            matches!(name, "?" | "#" | "$" | "@" | "*")
+            matches!(name, "?" | "#" | "$" | "-")
                 || (name == "!" && self.jobs.last_pid.is_some())
                 || self.var(name).is_some()
         }
@@ -733,6 +853,16 @@ impl Shell {
             "0" => self.arg0.clone(),
             "?" => self.last_status.to_string().into(),
             "#" => self.positional.len().to_string().into(),
+            "-" => {
+                let mut flags = String::new();
+                if self.options.errexit {
+                    flags.push('e');
+                }
+                if self.options.nounset {
+                    flags.push('u');
+                }
+                flags.into()
+            }
             "$" => self.shell_pid.to_string().into(),
             "!" => self
                 .jobs
@@ -743,6 +873,7 @@ impl Shell {
             "*" | "@" => {
                 let separator = self
                     .var("IFS")
+                    .filter(|_| name == "*")
                     .map(|v| {
                         v.to_string_lossy()
                             .chars()
@@ -773,6 +904,31 @@ impl Shell {
         }
     }
 }
+// Bash's $(<file) shorthand applies only to a lone stdin file redirection.
+fn substitution_input(script: &Script) -> Option<&syntax::Redirection> {
+    let [list] = script.lists.as_slice() else {
+        return None;
+    };
+    let [pipeline] = list.pipelines.as_slice() else {
+        return None;
+    };
+    let [command] = pipeline.commands.as_slice() else {
+        return None;
+    };
+    let CommandKind::Simple(simple) = &command.kind else {
+        return None;
+    };
+    let [redirect] = simple.redirections.as_slice() else {
+        return None;
+    };
+    (list.background.is_none()
+        && !pipeline.negated
+        && simple.words.is_empty()
+        && redirect.kind == syntax::RedirectionKind::Input
+        && redirect.descriptor.unwrap_or(0) == 0)
+        .then_some(redirect)
+}
+
 pub(crate) fn assignment(word: &Word) -> Option<(String, Word, bool)> {
     let first = word.parts.first()?;
     let WordPartKind::Text(text) = &first.kind else {

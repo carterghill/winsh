@@ -1,0 +1,18 @@
+name: Shell compatibility
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run shell tests
+        run: cargo test --locked -p winsh --all-targets
+      - name: Compare winsh with Git Bash
+        env:
+          WINSH_TEST_BASH: 'C:\Program Files\Git\bin\bash.exe'
+        run: cargo test --locked -p winsh match -- --ignored

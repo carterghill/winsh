@@ -124,10 +124,11 @@ cargo test --test shell redirections_and_pipelines_match_bash -- --ignored --exa
 cargo test --test language scripts_and_language_match_bash -- --ignored --exact
 ~~~
 
-These feed fixed fixtures to Bash and compare statuses, output streams, native
-arguments, and redirection files. They are opt-in; running winsh needs no Bash.
+The Windows shell compatibility workflow also runs these comparisons on pushes
+and pull requests. They feed fixed fixtures to Bash and compare statuses, output
+streams, native arguments, and redirection files. Local comparisons are opt-in.
 The language comparison covers scalar/default/positional expansion, lists,
 branches, loops, functions/local state, substitutions, arithmetic, grouped
-pipelines, read, and exit behavior. On Windows the quoting comparison excludes
+pipelines, read, errexit, nounset, pipefail, and exit behavior. On Windows the quoting comparison excludes
 raw-CR fixtures because the Bash port discards them while reading source; the
 Rust parser tests still cover them.

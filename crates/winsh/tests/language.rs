@@ -13,6 +13,79 @@ fn run(source: &str) -> Output {
 }
 fn cases() -> Vec<(&'static str, &'static str, i32)> {
     vec![
+        ("set -euo pipefail; false; echo continued", "", 1),
+        (
+            "set -e; f(){ return 3; }; if f; then :; else echo \"$?\"; fi; ! ! false; echo continued",
+            "3\n",
+            1,
+        ),
+        (
+            "set -u; set --; printf '<%s>\\n' \"${@-none}\" \"${*:-none}\"; unset v; echo \"${v:-'a}b'}\"",
+            "<none>\n<none>\n'a}b'\n",
+            0,
+        ),
+        (
+            "set -e; f() { false; echo tested; }; if f; then :; fi; ! true; false && echo no; while false; do echo no; done; { false && :; }; echo end",
+            "tested\nend\n",
+            0,
+        ),
+        (
+            "set -eu; unset x; set --; echo \"${x-default}:$#:$*:${#@}\"; echo \"$(false; echo sub)\"; set +e; false; set +u; echo \"<$x>\"",
+            "default:0::0\nsub\n<>\n",
+            0,
+        ),
+        (
+            "set -o pipefail; (exit 7) | (exit 4) | true; echo \"$?\"; set +o pipefail; false | true; echo \"$?\"",
+            "4\n0\n",
+            0,
+        ),
+        ("set -e -o pipefail; (exit 7) | true; echo continued", "", 7),
+        (
+            "set -o pipefail; (exit 9) | true & pid=$!; wait \"$pid\" || echo \"$?\"; (set +o pipefail; false | true) && echo isolated; false | true",
+            "9\nisolated\n",
+            1,
+        ),
+        (
+            "set -eu; (set +eu; false; echo \"${unbound:-sub}\"); set --; echo \"$((1 || absent)):$#\"; case $- in *e*u*) echo flags;; esac",
+            "sub\n1:0\nflags\n",
+            0,
+        ),
+        ("set -e; f() { false && :; }; f; echo continued", "", 1),
+        (
+            "set -e; if false | true; then echo last; fi; set -o pipefail; if false | true; then echo bad; else echo recovered; fi; ! false; echo end",
+            "last\nrecovered\nend\n",
+            0,
+        ),
+        (
+            "set -e; ! false | true; echo kept; f() { false; echo missed; }; f; echo continued",
+            "kept\n",
+            1,
+        ),
+        (
+            "unset dir; [ -d \"$dir\" ] || echo absent; [ -e '' ] || echo missing; [ -d . ] && echo directory; [ '!' = '!' ]",
+            "absent\nmissing\ndirectory\n",
+            0,
+        ),
+        (
+            "unset v; set -- ${v:-\"a b\"} ${v:-''} pre${v:-a' b' c}post; printf '[%s]\\n' \"$#\" \"$@\"; printf '<%s>\\n' \"${v:-'two words'}\"",
+            "[4]\n[a b]\n[]\n[prea b]\n[cpost]\n<'two words'>\n",
+            0,
+        ),
+        (
+            "unset v; set -- aa 'bb cc'; set -- ${v:-\"$@\"}; printf '<%s>\\n' \"$@\"; IFS=; set -- $@; echo \"$#/$1/$2\"",
+            "<aa>\n<bb cc>\n2/aa/bb cc\n",
+            0,
+        ),
+        (
+            "IFS=:; set -- aa bb; cat <<EOF\n$@/$*\nEOF\ncase \"$@\" in 'aa bb') echo space;; *) echo other;; esac; x=\"$@\"; echo \"$x\"",
+            "aa bb/aa bb\nspace\naa bb\n",
+            0,
+        ),
+        (
+            "unset x; export x; x=temp :; echo \"${x-fallback}\"; f() { local x; echo \"${x-local}\"; local x=kept; local x; echo \"$x\"; }; f; echo \"${x-still-unset}\"; x=; echo \"<${x-fallback}>\"",
+            "fallback\nlocal\nkept\nstill-unset\n<>\n",
+            0,
+        ),
         (
             "IFS=; v=; set -- $v; echo \"$#\"; set -- \"$v\" a${v}b; echo \"$#:$2\"",
             "0\n2:ab\n",
@@ -263,6 +336,75 @@ fn scripts_and_language_match_bash() {
         );
         assert_eq!(actual.stdout, expected.stdout, "stdout: {source}");
         assert_eq!(actual.stderr, expected.stderr, "stderr: {source}");
+    }
+    nounset_files(Some(&bash));
+}
+
+#[test]
+fn nounset_stops_noninteractive_scripts_and_preserves_default_expansion() {
+    nounset_files(None);
+}
+
+fn nounset_files(bash: Option<&std::ffi::OsStr>) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("strict.sh");
+    for expression in [
+        "$missing",
+        "${missing}",
+        "${#missing}",
+        "$((missing + 1))",
+        "$1",
+    ] {
+        std::fs::write(&path, format!(
+            "unset missing; set -u; set --; echo \"${{missing:-fallback}}\"\necho \"{expression}\"\necho continued\n"
+        )).unwrap();
+        let actual = Command::new(env!("CARGO_BIN_EXE_winsh"))
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(actual.stdout, b"fallback\n", "{expression}");
+        assert_eq!(actual.status.code(), Some(1), "{expression}");
+        assert!(
+            String::from_utf8_lossy(&actual.stderr).contains("unbound variable"),
+            "{expression}"
+        );
+        if let Some(bash) = bash {
+            let expected = Command::new(bash)
+                .args(["--noprofile", "--norc"])
+                .env_remove("BASH_ENV")
+                .env_remove("ENV")
+                .current_dir(dir.path())
+                .arg("strict.sh")
+                .output()
+                .unwrap();
+            assert_eq!(actual.status.code(), expected.status.code(), "{expression}");
+            assert_eq!(actual.stdout, expected.stdout, "{expression}");
+            assert!(
+                String::from_utf8_lossy(&expected.stderr).contains("unbound variable"),
+                "{expression}"
+            );
+        }
+    }
+    for (source, code) in [
+        (
+            "set -u; unset missing; echo \"$missing\"; echo continued",
+            127,
+        ),
+        ("set -u; unset missing; (echo \"$missing\")", 1),
+    ] {
+        let actual = run(source);
+        assert_eq!(actual.status.code(), Some(code), "{source}");
+        assert!(actual.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&actual.stderr).contains("unbound variable"));
+        if let Some(bash) = bash {
+            let expected = Command::new(bash)
+                .args(["--noprofile", "--norc", "-c", source])
+                .env_remove("BASH_ENV")
+                .env_remove("ENV")
+                .output()
+                .unwrap();
+            assert_eq!(actual.status.code(), expected.status.code(), "{source}");
+        }
     }
 }
 

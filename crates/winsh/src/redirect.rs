@@ -8,7 +8,7 @@ use std::{
 use crate::{
     Outcome, Shell, ShellIo, expand, platform,
     streams::Stream,
-    syntax::{self, Redirection, RedirectionKind},
+    syntax::{Redirection, RedirectionKind},
 };
 
 /// Apply in source order to stage-local streams. Earlier stderr redirections
@@ -23,9 +23,7 @@ pub(crate) fn apply(
             let body = if doc.quoted {
                 doc.body.as_str().into()
             } else {
-                let expanded = syntax::parse_document_body(&doc.body)
-                    .map_err(|e| expand::error(&redirect.target, e.to_string()))
-                    .and_then(|word| expand::scalar(&word, shell, streams));
+                let expanded = expand::document(&doc.body, &redirect.target, shell, streams);
                 match expanded {
                     Ok(value) => std::borrow::Cow::Owned(value.to_string_lossy().into_owned()),
                     Err(error) => return shell.expansion_failure(error, streams).map(Some),
@@ -40,12 +38,11 @@ pub(crate) fn apply(
                 Err(error) => return shell.expansion_failure(error, streams).map(Some),
             };
             let [target] = fields.as_slice() else {
-                return shell
-                    .expansion_failure(
-                        expand::error(&redirect.target, "ambiguous redirect"),
-                        streams,
-                    )
-                    .map(Some);
+                streams.err(format_args!(
+                    "winsh: {}\n",
+                    expand::error(&redirect.target, "ambiguous redirect")
+                ))?;
+                return Ok(Some(Outcome::Continue(1)));
             };
             one(shell, redirect, target, streams)
                 .map_err(|error| format!("{}: {error}", target.to_string_lossy()))

@@ -246,6 +246,9 @@ struct Request {
     task: Task,
     input: Input,
     variables: BTreeMap<String, OsString>,
+    unassigned_exports: Vec<OsString>,
+    options: crate::shell::ShellOptions,
+    ignore_errexit: bool,
     functions: BTreeMap<String, ShellCommand>,
     aliases: BTreeMap<String, crate::aliases::Alias>,
     args: Vec<OsString>,
@@ -342,6 +345,9 @@ impl Shell {
             Input::Descriptor(fd) => streams.with_stdin(os::received_input(fd)?),
         };
         self.variables = request.variables;
+        self.unassigned_exports = request.unassigned_exports;
+        self.options = request.options;
+        self.ignore_errexit = request.ignore_errexit;
         self.functions = request.functions;
         self.aliases = request.aliases;
         self.set_arguments(request.arg0, request.args);
@@ -553,6 +559,9 @@ impl Shell {
                 BTreeMap::new()
             },
             args: self.positional.clone(),
+            unassigned_exports: self.unassigned_exports.clone(),
+            options: self.options,
+            ignore_errexit: self.ignore_errexit,
             arg0: self.arg0.clone(),
             status: self.last_status,
             last_pid: self.jobs.last_pid,

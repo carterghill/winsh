@@ -28,8 +28,7 @@ pub(crate) fn run(shell: &Shell, pipeline: &ScriptPipeline, streams: &ShellIo) -
         let cancellation = shell.cancellation.clone().unwrap_or_default();
         let mut workers = Vec::new();
         for (index, (command, mut io)) in pipeline.commands.iter().zip(inputs).enumerate() {
-            let mut session = shell.clone();
-            session.flow = None;
+            let mut session = shell.subshell();
             session.cancellation = Some(cancellation.clone());
             let cancellation = cancellation.clone();
             let pipe_stderr = pipeline.connections.get(index) == Some(&PipeKind::StdoutAndStderr);
@@ -49,7 +48,9 @@ pub(crate) fn run(shell: &Shell, pipeline: &ScriptPipeline, streams: &ShellIo) -
                 .join()
                 .map_err(|_| io::Error::other("pipeline worker panicked"))
                 .and_then(|result| result);
-            if result.is_ok() {
+            // Join in pipeline order. With pipefail, retain the rightmost
+            // failure even if a later stage succeeds. Preserve host I/O errors.
+            if result.is_ok() && (!shell.options.pipefail || !matches!(status, Ok(0))) {
                 result = status;
             }
         }

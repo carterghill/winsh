@@ -45,7 +45,7 @@ pub(crate) use heredoc::parse_document_body;
 pub(crate) mod completion;
 #[path = "language_parser.rs"]
 mod language;
-pub(crate) use language::parse_fragment;
+pub(crate) use language::{parse_fragment, parse_parameter_word};
 pub use language::{parse_script, valid_name};
 
 impl<'a> Parser<'a> {

@@ -51,6 +51,9 @@ impl Parser<'_> {
             }
             scan.pos += ch.len_utf8();
         }
+        if text == ")" {
+            return Some(scan.pos);
+        }
         scan.peek()
             .is_none_or(|ch| {
                 matches!(
@@ -165,7 +168,11 @@ impl Parser<'_> {
 
     fn language_pipeline(&mut self, depth: usize) -> Result<ScriptPipeline, ParseError> {
         let start = self.pos;
-        let negated = self.take_keyword("!");
+        let mut negated = false;
+        while self.take_keyword("!") {
+            negated = !negated;
+            self.skip_trivia()?;
+        }
         self.skip_trivia()?;
         let mut pipeline = ScriptPipeline {
             label: None,
@@ -523,15 +530,22 @@ pub(super) fn plain(word: &Word) -> Option<&str> {
 
 /// Parameter default words are fragments: spaces and operators are text here.
 pub(crate) fn parse_fragment(source: &str) -> Result<Word, ParseError> {
+    parse_parameter_word(source, false)
+}
+
+pub(crate) fn parse_parameter_word(source: &str, quoted: bool) -> Result<Word, ParseError> {
     let mut parser = Parser::new(source, 0, 0);
     let mut parts = Vec::new();
     while let Some(ch) = parser.peek() {
         let start = parser.pos;
         match ch {
-            '\'' => parts.push(parser.single_quoted()?),
+            '\'' if !quoted => parts.push(parser.single_quoted()?),
             '"' => parts.push(parser.double_quoted()?),
-            '\\' => parser.escape(&mut parts, false)?,
-            '$' => parser.dollar(&mut parts, false)?,
+            '\\' if quoted && source[start + 1..].starts_with('}') => {
+                parser.escape(&mut parts, false)?
+            }
+            '\\' => parser.escape(&mut parts, quoted)?,
+            '$' => parser.dollar(&mut parts, quoted)?,
             '`' => return Err(parser.backtick_error()),
             _ => {
                 parser.pos += ch.len_utf8();

@@ -653,6 +653,16 @@ fn variables_export_temporary_assignments_and_native_lookup_use_session_state() 
     assert_eq!(f.out(), "two wordstemporary<two words>");
     assert_eq!(f.run(&format!("unset {name}; {name}=first {name}+=second {child} env {name}; printf '<%s>' \"${{{name}:-gone}}\"")).status(),0);
     assert_eq!(f.out(), "two wordstemporary<two words>firstsecond<gone>");
+    assert_eq!(
+        f.run(&format!("export {name}; {child} env-is-set {name}"))
+            .status(),
+        1
+    );
+    assert_eq!(
+        f.run(&format!("{name}=; {child} env-is-set {name}"))
+            .status(),
+        0
+    );
     fs::copy(helper(), f.root.0.join("script-helper.exe")).unwrap();
     assert_eq!(f.run("PATH=.; script-helper status 19").status(), 19);
     assert!(f.err().is_empty());
@@ -672,9 +682,28 @@ fn globbing_and_redirect_expansions_respect_quotes_and_working_directory() {
     assert_eq!(f.out(), "<a.txt>\n<b.txt>\n<*.txt>\n<no-match*.x>\n");
     assert_eq!(f.run("name='space file'; echo data >\"$name\"").status(), 0);
     assert_eq!(fs::read(f.root.0.join("space file")).unwrap(), b"data\n");
-    assert_eq!(f.run("echo bad >$name").status(), 2);
-    assert_eq!(f.run("echo bad >[ab].txt").status(), 2);
+    assert_eq!(f.run("echo bad >$name").status(), 1);
+    assert_eq!(f.run("echo bad >[ab].txt").status(), 1);
     assert_eq!(fs::read(f.root.0.join("a.txt")).unwrap(), b"");
+}
+
+#[test]
+fn assignment_redirects_and_file_substitutions_preserve_contents_and_status() {
+    let mut f = Fixture::new();
+    fs::write(f.root.0.join("a"), "keep\n\n").unwrap();
+    fs::write(f.root.0.join("b"), "truncate").unwrap();
+    assert_eq!(
+        f.run("out=a; out=b >\"$out\"; printf '<%s>' \"$(<a)\"")
+            .status(),
+        0
+    );
+    assert_eq!(fs::read(f.root.0.join("a")).unwrap(), b"keep\n\n");
+    assert_eq!(fs::read(f.root.0.join("b")).unwrap(), b"");
+    assert_eq!(f.out(), "<keep>");
+    assert_eq!(f.run("v=$(<missing) || echo read-failed; dest='a b'; echo bad >$dest || echo recovered; echo done").status(), 0);
+    assert_eq!(f.out(), "<keep>read-failed\nrecovered\ndone\n");
+    assert!(f.err().contains("ambiguous redirect"));
+    assert!(!f.root.0.join("a b").exists());
 }
 
 #[test]
@@ -1826,6 +1855,13 @@ fn redirections_and_pipelines_match_bash() {
         "PATH=/usr/bin:/bin; grep -Fc missing a".to_owned(),
         "cd missing 1>a 2>&1-".to_owned(),
         ">a".to_owned(),
+        "out=a; out=b >\"$out\"; printf '<%s>\\n' \"$(<a)\" \"$(0<b)\"".to_owned(),
+        "out=a; out=b printf data >\"$out\"; echo \"$out\"".to_owned(),
+        "printf 'first\\nsecond\\n\\n' >a; f=a; v=$(<\"$f\"); printf '<%s>\\n' \"$v\" \"$(<a; :)\""
+            .to_owned(),
+        "f='a b'; { echo bad >$f || echo recovered; } 2>&-; echo done".to_owned(),
+        "{ v=$(<missing); } 2>&- || echo read-failed".to_owned(),
+        format!("unset x; export x; {child} env-is-set x || echo absent; x=passed; {child} env x"),
     ];
     for source in cases {
         let mut f = Fixture::new();

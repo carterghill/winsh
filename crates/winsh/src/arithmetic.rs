@@ -1,5 +1,5 @@
-use crate::Shell;
-pub(crate) fn evaluate(source: &str, shell: &Shell) -> Result<i64, String> {
+use crate::{Shell, expand::ExpansionFailure};
+pub(crate) fn evaluate(source: &str, shell: &Shell) -> Result<i64, ExpansionFailure> {
     if source.contains("++") || source.contains("--") || source.contains("**") {
         return Err("arithmetic increment and exponentiation are not supported".into());
     }
@@ -36,7 +36,7 @@ impl Parser<'_> {
             self.pos += 1;
         }
     }
-    fn expression(&mut self, minimum: u8, active: bool) -> Result<i64, String> {
+    fn expression(&mut self, minimum: u8, active: bool) -> Result<i64, ExpansionFailure> {
         self.depth += 1;
         if self.depth > 64 {
             return Err("arithmetic nesting limit (64)".into());
@@ -80,7 +80,11 @@ impl Parser<'_> {
                 return Err("expected integer or variable in arithmetic expression".into());
             }
             if crate::syntax::valid_name(token) {
-                let value = self.shell.var(token).unwrap_or_default().to_string_lossy();
+                let variable = self.shell.var(token);
+                if active && variable.is_none() && self.shell.options.nounset {
+                    return Err(ExpansionFailure::Unbound(token.into()));
+                }
+                let value = variable.unwrap_or_default().to_string_lossy();
                 if value.is_empty() || !active {
                     0
                 } else {

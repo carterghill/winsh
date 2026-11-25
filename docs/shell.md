@@ -158,7 +158,7 @@ The script built-ins are described below.
 | 1 | Built-in operation, output write, or redirection failure. |
 | 2 | Invalid syntax, unsupported expansion, or command usage. |
 | 126 | A program was found but could not be executed. |
-| 127 | Command not found. |
+| 127 | Command lookup failure, or an unbound parameter at the top level of `-c` under `set -u`. |
 | 130 | Cancelled input or Windows STATUS_CONTROL_C_EXIT from a child. |
 
 Other native statuses pass through unchanged. A nonzero command status does not
@@ -351,12 +351,11 @@ built-in in a multi-stage pipeline uses an independent copy of the shell session
 session running. A standalone redirected `cd` or `exit` still affects the parent
 session normally.
 
-The pipeline status is the last stage's status, including 126/127 for a failed
-last executable or 1 for a last-stage redirection failure. An earlier stage's
-failure does not override a successful final stage. `! pipeline` negates its
-status. End a pipeline with `&` to run it as a [background job](#background-jobs-and-job-control).
-The final stage determines its status when collected with `wait`. The `pipefail`
-option remains unsupported. Earlier stages may fail
+By default a pipeline returns the last stage's status. With `set -o pipefail`,
+it returns the rightmost nonzero stage status, or zero when every stage succeeds.
+`! pipeline` negates the resulting status. End a pipeline with `&` to run it as
+a [background job](#background-jobs-and-job-control). The worker inherits these
+options and `wait` collects its status. Earlier stages may fail
 with a broken pipe if a downstream command exits early; the shell still waits
 for every stage. If an engine I/O failure aborts startup or waiting, guards kill
 and reap the native stages already started.
@@ -365,9 +364,11 @@ A newline after a pipe may be followed by comments and then another command.
 A missing redirection operand is a syntax error, not a request for another input
 line. A complete script is parsed before execution. Expansions occur when each
 command is reached, so skipped branches and short-circuited lists have no
-expansion side effects. Expansion failures stop the current script evaluation
-with status 2; the interactive session can accept another command. Earlier
-commands or pipeline stages may already have run.
+expansion side effects. An ambiguous redirect fails its command with status 1,
+so `||` can recover. An unset parameter under `set -u` ends a script file,
+stdin script, or subshell with status 1. At the top level of `-c` it exits
+with 127. Other expansion errors stop the current evaluation with status 2.
+Earlier commands or pipeline stages may already have run.
 
 These rules follow the Bash references for [redirections](https://www.gnu.org/software/bash/manual/html_node/Redirections.html)
 and [pipelines](https://www.gnu.org/software/bash/manual/html_node/Pipelines.html).
@@ -409,11 +410,11 @@ done
 
 | Feature | Supported forms |
 | --- | --- |
-| Scalar assignments | `name=value`, `name+=value`, assignment-only commands, and temporary `name=value command` prefixes. Values avoid splitting/globbing. |
-| Exported environment | Inherited environment entries are exported; `export name[=value]` exports a scalar, and `unset name` removes it. Unexported variables stay in the shell. |
+| Scalar assignments | `name=value`, `name+=value`, assignment-only commands, and temporary `name=value command` prefixes. An assignment-only command sets the variables before opening its redirects. Values avoid splitting/globbing. |
+| Exported environment | `export name[=value]` exports a scalar. Exporting an unset name marks its next assignment for export. `unset name` removes the value and export attribute. |
 | Parameters | `$name`, `${name}`, `$0`…`$9`, `${10}` onward, `$?`, `$#`, `$$`, `$@`, and `$*`. |
 | Parameter operators | `${name-word}`, `${name:-word}`, `+`, `:+`, `=`, `:=`, `?`, `:?`, and `${#name}`. Default words expand lazily. Quote the entire expansion when preserving spaces. |
-| Command substitution | `$(commands)` runs in an isolated session, captures UTF-8 stdout, and removes trailing LF bytes. Stderr stays on the current stderr. An assignment-only command returns the last substitution's status. |
+| Command substitution | `$(commands)` runs in an isolated session, captures UTF-8 stdout, and removes trailing LF bytes. `$(<file)` reads a file with the same text and trailing-newline rules. Stderr stays on the current stderr. An assignment-only command returns the last substitution's status. |
 | Integer expansion | `$((expression))` with decimal/octal/hex integers, integer-valued scalar names, parentheses, unary `+ - ! ~`, arithmetic `+ - * / %`, shifts, comparisons, bitwise operators, and short-circuit `&&` / `||`. Arithmetic wraps at 64 bits; division errors return 2. |
 | Field splitting | Unquoted parameter/substitution results split using IFS (default space/tab/LF); quoted results preserve empty arguments and spaces. `"$@"` preserves separate positional arguments. |
 | Pathname patterns | Unquoted `*`, `?`, and bracket/range/negated classes. Matches are sorted, exclude leading-dot names unless explicitly requested, and leave unmatched patterns literal. Use slash path separators. |
@@ -445,8 +446,16 @@ membership. Extended glob patterns such as `@(one|two)` are outside this subset.
 | `test` / `[` | Empty/nonempty strings; `-n`, `-z`, `-e`, `-f`, `-d`, `-s`; string `=`, `==`, `!=`, `<`, `>`; integer `-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`; leading `!`. `[` requires `]`. Combine tests with shell `&&` / `||`. Quote `<` and `>`. |
 | `read [-r] [names...]` | Read one UTF-8 LF-terminated line without reading ahead. With no names, set REPLY; otherwise split using IFS, with the final name receiving remaining fields. `-r` preserves backslashes. EOF returns 1, including a final partial line. |
 | `set -- [arguments...]` | Replace positional arguments. |
+| `set -e`, `set -u`, `set -o pipefail` | Enable errexit, nounset, and pipefail. Options can be combined as `set -euo pipefail`. Use `+` to disable an option. |
 | `shift [count]` | Drop positional arguments; default one. |
 | `unset [-v|-f] names...` | Remove variables or functions. |
+
+With `set -e`, a failing command or pipeline ends the script. Commands tested by
+`if`, `while`, `until`, `!`, and the nonfinal positions of `&&` or `||` lists
+can return failure normally. Functions called in a tested position inherit this
+exception. Command substitutions start with errexit cleared. With `set -u`,
+expanding a missing scalar or positional argument reports an unbound variable.
+Default expressions such as `${name:-value}` and an empty `"$@"` still work.
 
 Command substitutions collect their text result while concurrently draining the
 pipe, so output larger than a pipe buffer does not deadlock. Unlike binary
@@ -471,8 +480,8 @@ operators, indirect expansion, brace expansion, ANSI-C quoting, and backticks
 remain pending. The `function name` spelling is unsupported; use `name() { ...; }`.
 Advanced quoting within parameter default words, combined whitespace/nonwhitespace
 IFS edge cases, and escaped IFS characters in non-raw read are not fully Bash-compatible.
-`return` accepts a nonnegative status; shell options (`set -e`, `-u`, pipefail,
-shopt), readonly variables, traps, and POSIX special-built-in error rules
+`return` accepts a nonnegative status. Additional shell options, `shopt`,
+readonly variables, traps, and POSIX special-built-in error rules
 are not implemented. Unsupported built-in flags/forms report errors.
 
 Here-strings (`<<<`), process substitution, named

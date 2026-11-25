@@ -10,7 +10,7 @@ mod parser;
 pub(crate) use parser::completion::{Target, completion_word};
 pub use parser::parse_script;
 pub use parser::valid_name;
-pub(crate) use parser::{parse_document_body, parse_fragment};
+pub(crate) use parser::{parse_document_body, parse_fragment, parse_parameter_word};
 pub use parser::{parse_pipeline, parse_simple_command};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]

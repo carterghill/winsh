@@ -65,6 +65,9 @@ pub(crate) fn dispatch(
                         value.to_string_lossy().replace('\'', "'\\''")
                     ))?;
                 }
+                for key in &shell.unassigned_exports {
+                    io.out(format_args!("export {}\n", key.to_string_lossy()))?;
+                }
                 return Ok(Outcome::Continue(0));
             }
             for arg in args {
@@ -79,24 +82,25 @@ pub(crate) fn dispatch(
                 }
                 if name == "local" {
                     let saved = shell.save_var(key);
-                    shell
-                        .scopes
-                        .last_mut()
-                        .unwrap()
-                        .entry(key.into())
-                        .or_insert(saved);
-                    if value.is_none() {
-                        shell.unset(key);
-                        shell.variables.insert(key.into(), OsString::new());
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        shell.scopes.last_mut().unwrap().entry(key.into())
+                    {
+                        entry.insert(saved);
+                        if value.is_none() {
+                            let exported =
+                                shell.env(key).is_some() || shell.export_on_assignment(key);
+                            shell.unset(key);
+                            if exported {
+                                shell.export_var(key);
+                            }
+                        }
                     }
                 }
                 if let Some(value) = value {
                     shell.set_var(key, value.into());
                 }
                 if name == "export" {
-                    let value = shell.var(key).unwrap_or_default().to_owned();
-                    shell.variables.remove(key);
-                    shell.set_env(key, value);
+                    shell.export_var(key);
                 }
             }
             0
@@ -121,14 +125,10 @@ pub(crate) fn dispatch(
             }
             0
         }
-        "set" => {
-            if args.first().is_some_and(|a| a == "--") {
-                shell.positional = args[1..].to_vec();
-                0
-            } else {
-                return fail(io, name, "supported form: set -- [arguments...]", 2);
-            }
-        }
+        "set" => match set(shell, args) {
+            Ok(()) => 0,
+            Err(message) => return fail(io, name, message, 2),
+        },
         "shift" => {
             let n = match count(args, 1) {
                 Ok(n) => n,
@@ -220,6 +220,49 @@ fn fail(
 ) -> io::Result<Outcome> {
     io.err(format_args!("winsh: {name}: {message}\n"))?;
     Ok(Outcome::Continue(status))
+}
+
+fn set(shell: &mut Shell, mut args: &[OsString]) -> Result<(), &'static str> {
+    if args.is_empty() {
+        return Err("expected shell options or -- [arguments...]");
+    }
+    while let Some((arg, rest)) = args.split_first() {
+        if arg == "--" {
+            shell.positional = rest.to_vec();
+            return Ok(());
+        }
+        let Some((prefix, flags)) = arg.to_str().and_then(|s| s.split_at_checked(1)) else {
+            break;
+        };
+        if !matches!(prefix, "-" | "+") || flags.is_empty() {
+            break;
+        }
+        let enabled = prefix == "-";
+        args = rest;
+        for flag in flags.chars() {
+            let option = match flag {
+                'e' => "errexit",
+                'u' => "nounset",
+                'o' => {
+                    let (option, rest) =
+                        args.split_first().ok_or("expected option name after o")?;
+                    args = rest;
+                    option.to_str().ok_or("invalid option name")?
+                }
+                _ => return Err("unsupported shell option"),
+            };
+            match option {
+                "errexit" => shell.options.errexit = enabled,
+                "nounset" => shell.options.nounset = enabled,
+                "pipefail" => shell.options.pipefail = enabled,
+                _ => return Err("unsupported shell option"),
+            }
+        }
+    }
+    if !args.is_empty() {
+        shell.positional = args.to_vec();
+    }
+    Ok(())
 }
 fn count(args: &[OsString], default: usize) -> Result<usize, &'static str> {
     if args.len() > 1 {
@@ -317,11 +360,14 @@ fn test(shell: &Shell, args: &[OsString]) -> Result<bool, String> {
     match args.len() {
         0 => Ok(false),
         1 => Ok(!args[0].is_empty()),
-        _ if args[0] == "!" => Ok(!test(shell, &args[1..])?),
         2 => match text(0).as_ref() {
+            "!" => Ok(!test(shell, &args[1..])?),
             "-n" => Ok(!args[1].is_empty()),
             "-z" => Ok(args[1].is_empty()),
             "-e" | "-f" | "-d" | "-s" => {
+                if args[1].is_empty() {
+                    return Ok(false);
+                }
                 let path = shell.cwd().join(Path::new(&args[1]));
                 Ok(match text(0).as_ref() {
                     "-e" => path.exists(),
@@ -349,8 +395,10 @@ fn test(shell: &Shell, args: &[OsString]) -> Result<bool, String> {
                     _ => a >= b,
                 })
             }
+            _ if args[0] == "!" => Ok(!test(shell, &args[1..])?),
             _ => Err("unsupported binary test operator".into()),
         },
+        _ if args[0] == "!" => Ok(!test(shell, &args[1..])?),
         _ => Err("use shell && / || to combine tests".into()),
     }
 }

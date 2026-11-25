@@ -24,6 +24,7 @@ fn main() {
         "env-optional" => {
             if let Some(value) = env::var_os(args.next().unwrap()) { io::stdout().write_all(value.as_encoded_bytes()).unwrap(); }
         }
+        "env-is-set" => process::exit(i32::from(env::var_os(args.next().unwrap()).is_none())),
         "status" => process::exit(args.next().unwrap().to_str().unwrap().parse().unwrap()),
         "both" => {
             print!("child stdout");

@@ -26,6 +26,7 @@ pub(crate) fn dispatch(
         Some("exit") => exit(shell, args, io)?,
         Some("alias") => Outcome::Continue(crate::aliases::define(shell, args, io)?),
         Some("unalias") => Outcome::Continue(crate::aliases::remove(shell, args, io)?),
+        Some("kill") if shell.kill_self(args) => Outcome::Continue(0),
         Some(name) if crate::jobs::BUILTINS.contains(&name) => {
             Outcome::Continue(shell.jobs.builtin(name, args, io)?)
         }

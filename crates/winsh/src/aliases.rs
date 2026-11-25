@@ -16,7 +16,7 @@ pub(crate) struct Alias {
     words: Vec<Word>,
 }
 
-fn display(name: &str, alias: &Alias, io: &mut ShellIo) -> io::Result<()> {
+pub(crate) fn display(name: &str, alias: &Alias, io: &mut ShellIo) -> io::Result<()> {
     let quoted = alias.source.replace('\'', "'\\''");
     io.out(format_args!("alias {name}='{quoted}'\n"))
 }

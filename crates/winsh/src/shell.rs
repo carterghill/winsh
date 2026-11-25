@@ -35,6 +35,7 @@ pub(crate) struct SavedVariable {
     value: Option<OsString>,
     exported: Option<OsString>,
     export_on_assignment: bool,
+    opt_offset: usize,
 }
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -58,6 +59,8 @@ pub struct Shell {
     pub(crate) functions: BTreeMap<String, Command>,
     pub(crate) aliases: BTreeMap<String, crate::aliases::Alias>,
     pub(crate) positional: Vec<OsString>,
+    pub(crate) opt_offset: usize,
+    pub(crate) traps: crate::traps::Traps,
     pub(crate) arg0: OsString,
     pub(crate) flow: Option<Flow>,
     pub(crate) loop_depth: usize,
@@ -100,6 +103,8 @@ impl Shell {
             functions: BTreeMap::new(),
             aliases: BTreeMap::new(),
             positional: Vec::new(),
+            opt_offset: 0,
+            traps: Default::default(),
             arg0: "winsh".into(),
             flow: None,
             loop_depth: 0,
@@ -116,6 +121,8 @@ impl Shell {
             last_status: 0,
         };
         shell.set_env("PWD", shell.cwd.clone().into_os_string());
+        shell.set_var("OPTIND", "1".into());
+        shell.set_var("OPTERR", "1".into());
         Ok(shell)
     }
     pub fn cwd(&self) -> &Path {
@@ -172,6 +179,9 @@ impl Shell {
     }
     pub fn run(&mut self, source: &str, io: &mut ShellIo) -> io::Result<Outcome> {
         match syntax::parse_script(source) {
+            Ok(script) if self.source_depth > 0 && script.lists.is_empty() => {
+                Ok(self.record(Outcome::Continue(0)))
+            }
             Ok(script) => self.execute_script(&script, io),
             Err(error) => {
                 io.err(format_args!("winsh: {error}\n"))?;
@@ -191,6 +201,7 @@ impl Shell {
         let mut child = self.clone();
         child.flow = None;
         child.command_string = false;
+        child.traps = self.traps.subshell();
         child
     }
     pub fn execute(
@@ -277,6 +288,9 @@ impl Shell {
                     index < list.operators.len() || pipeline.negated,
                     |shell| shell.evaluate_pipeline(pipeline, io),
                 )?;
+                if let signal @ Outcome::Exit(_) = self.pending_signals(io)? {
+                    return Ok(signal);
+                }
                 if matches!(outcome, Outcome::Exit(_)) || self.flow.is_some() || self.abort_script {
                     return Ok(outcome);
                 }
@@ -295,16 +309,23 @@ impl Shell {
         self.ignore_errexit = previous;
         result
     }
-    fn check_errexit(&self, outcome: Outcome) -> Outcome {
-        if self.options.errexit
-            && !self.ignore_errexit
-            && self.flow.is_none()
-            && outcome.status() != 0
+    fn check_failure(&mut self, outcome: Outcome, io: &mut ShellIo) -> io::Result<Outcome> {
+        if !matches!(outcome, Outcome::Continue(n) if n != 0)
+            || self.ignore_errexit
+            || self.flow.is_some()
         {
+            return Ok(outcome);
+        }
+        let outcome = if self.abort_script {
+            outcome
+        } else {
+            self.error_trap(outcome.status(), io)?
+        };
+        Ok(if self.options.errexit {
             Outcome::Exit(outcome.status())
         } else {
             outcome
-        }
+        })
     }
     pub(crate) fn evaluate_pipeline(
         &mut self,
@@ -319,12 +340,13 @@ impl Shell {
         if self.jobs.interactive && pipeline.uses_subshell() {
             // The worker evaluates the full pipeline, including its negation.
             let outcome = self.launch_pipeline(pipeline, io)?;
-            return Ok(self.check_errexit(outcome));
+            return self.check_failure(outcome, io);
         }
         let outcome = if pipeline.commands.len() == 1 {
             self.command(&pipeline.commands[0], io, false)?
         } else {
-            self.check_errexit(Outcome::Continue(pipeline::run(self, pipeline, io)?))
+            let status = pipeline::run(self, pipeline, io)?;
+            self.check_failure(Outcome::Continue(status), io)?
         };
         let outcome = if pipeline.negated && matches!(outcome, Outcome::Continue(_)) {
             Outcome::Continue(i32::from(outcome.status() == 0))
@@ -342,10 +364,10 @@ impl Shell {
         let mut streams = io.try_clone()?;
         let result = if let CommandKind::Simple(simple) = &command.kind {
             self.simple(simple, &mut streams, pipe_stderr)
-                .map(|outcome| self.check_errexit(outcome))
+                .and_then(|outcome| self.check_failure(outcome, io))
         } else {
             match redirect::apply(self, &command.redirections, &mut streams)? {
-                Some(failure) => Ok(self.check_errexit(failure)),
+                Some(failure) => self.check_failure(failure, io),
                 None => {
                     if pipe_stderr {
                         streams.duplicate(2, 1)?;
@@ -354,7 +376,7 @@ impl Shell {
                 }
             }
         };
-        match result {
+        let result = match result {
             Ok(outcome) => Ok(self.record(outcome)),
             Err(error)
                 if matches!(
@@ -363,10 +385,13 @@ impl Shell {
                 ) =>
             {
                 let _ = streams.err(format_args!("winsh: {error}\n"));
-                Ok(self.record(self.check_errexit(Outcome::Continue(1))))
+                let outcome = self.check_failure(Outcome::Continue(1), io)?;
+                Ok(self.record(outcome))
             }
             Err(error) => Err(error),
-        }
+        };
+        io.inherit_retained(&mut streams);
+        result
     }
     pub(crate) fn expansion_failure(
         &mut self,
@@ -486,7 +511,14 @@ impl Shell {
             let previous = std::mem::replace(&mut self.positional, arguments[1..].to_vec());
             self.function_depth += 1;
             self.scopes.push(BTreeMap::new());
+            let err = self.traps.actions.remove(&crate::traps::Event::Err);
             let result = self.command(&body, io, false);
+            if let Some(action) = err {
+                self.traps
+                    .actions
+                    .entry(crate::traps::Event::Err)
+                    .or_insert(action);
+            }
             self.function_depth -= 1;
             self.positional = previous;
             for (name, value) in self.scopes.pop().unwrap() {
@@ -497,7 +529,17 @@ impl Shell {
                 return Ok(Outcome::Continue(status));
             }
             result
-        } else if builtins::recognizes(name) {
+        } else {
+            self.invoke_command(arguments, io)
+        }
+    }
+    pub(crate) fn invoke_command(
+        &mut self,
+        arguments: &[OsString],
+        io: &mut ShellIo,
+    ) -> io::Result<Outcome> {
+        let name = &arguments[0];
+        if builtins::recognizes(name) {
             Ok(pipeline::builtin(self, arguments, io))
         } else if let Some(utility) = Utility::from_name(name) {
             let status = if let Some(executable) = &self.utility_executable {
@@ -528,7 +570,10 @@ impl Shell {
                 subshell: true,
             } => {
                 let mut child = self.subshell();
-                Ok(self.check_errexit(Outcome::Continue(child.execute_script(body, io)?.status())))
+                let mut streams = io.try_clone()?;
+                let status = child.execute_script(body, &mut streams)?.status();
+                let status = child.finish(status, &mut streams)?;
+                self.check_failure(Outcome::Continue(status), io)
             }
             CommandKind::If {
                 branches,
@@ -719,6 +764,7 @@ impl Shell {
                     Ok(Outcome::Continue(2))
                 }
             };
+            let outcome = outcome.and_then(|outcome| child.finish(outcome.status(), &mut io));
             drop(io);
             let mut bytes = collector
                 .join()
@@ -738,7 +784,7 @@ impl Shell {
                     "command substitution output must be UTF-8",
                 )
             })?;
-            Ok((text.into(), outcome?.status()))
+            Ok((text.into(), outcome?))
         })
     }
     fn read_substitution(
@@ -783,6 +829,9 @@ impl Shell {
         })
     }
     pub(crate) fn set_env(&mut self, name: &str, value: OsString) {
+        if name == "OPTIND" {
+            self.opt_offset = 0;
+        }
         self.unassigned_exports
             .retain(|key| !platform::env_name_eq(key, name));
         self.environment
@@ -790,6 +839,9 @@ impl Shell {
         self.environment.push((name.into(), value));
     }
     pub(crate) fn set_var(&mut self, name: &str, value: OsString) {
+        if name == "OPTIND" {
+            self.opt_offset = 0;
+        }
         if self.env(name).is_some() || self.export_on_assignment(name) {
             self.set_env(name, value);
             self.variables.remove(name);
@@ -798,6 +850,9 @@ impl Shell {
         }
     }
     pub(crate) fn unset(&mut self, name: &str) {
+        if name == "OPTIND" {
+            self.opt_offset = 0;
+        }
         self.unassigned_exports
             .retain(|key| !platform::env_name_eq(key, name));
         self.variables.remove(name);
@@ -819,6 +874,7 @@ impl Shell {
     }
     pub(crate) fn save_var(&self, name: &str) -> SavedVariable {
         SavedVariable {
+            opt_offset: self.opt_offset,
             value: self.variables.get(name).cloned(),
             exported: self.env(name).map(OsStr::to_owned),
             export_on_assignment: self.export_on_assignment(name),
@@ -833,6 +889,9 @@ impl Shell {
             self.set_env(name, v);
         } else if saved.export_on_assignment {
             self.unassigned_exports.push(name.into());
+        }
+        if name == "OPTIND" {
+            self.opt_offset = saved.opt_offset;
         }
     }
     pub(crate) fn parameter_is_set(&self, name: &str) -> bool {

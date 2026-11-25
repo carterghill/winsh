@@ -15,6 +15,9 @@ use std::os::windows::io::OwnedHandle as OwnedIo;
 pub struct ShellIo {
     streams: [Stream; 3],
     stderr_redirected: bool,
+    // Descriptors redirected by this command and those committed by exec.
+    temporary: u8,
+    retained: u8,
 }
 
 pub(crate) enum Stream {
@@ -34,6 +37,8 @@ impl Default for ShellIo {
                 Stream::Inherited(2),
             ],
             stderr_redirected: false,
+            temporary: 0,
+            retained: 0,
         }
     }
 }
@@ -64,6 +69,8 @@ impl ShellIo {
                 self.streams[2].try_clone()?,
             ],
             stderr_redirected: self.stderr_redirected,
+            temporary: 0,
+            retained: 0,
         })
     }
 
@@ -73,6 +80,7 @@ impl ShellIo {
             .get_mut(usize::from(descriptor))
             .ok_or_else(bad_descriptor)?;
         *slot = stream;
+        self.temporary |= 1 << descriptor;
         if descriptor == 2 {
             self.stderr_redirected = true;
         }
@@ -89,6 +97,21 @@ impl ShellIo {
         }
         let stream = original.try_clone()?;
         self.set(destination, stream)
+    }
+    pub(crate) fn retain_redirections(&mut self) {
+        self.retained |= self.temporary;
+    }
+    pub(crate) fn inherit_retained(&mut self, child: &mut Self) {
+        for (fd, stream) in child.streams.iter_mut().enumerate() {
+            if child.retained & (1 << fd) != 0 {
+                self.streams[fd] = std::mem::replace(stream, Stream::Closed);
+                if fd == 2 {
+                    self.stderr_redirected = child.stderr_redirected;
+                }
+            }
+        }
+        // A surrounding function or group restores its own temporary redirects.
+        self.retained |= child.retained & !self.temporary;
     }
 
     pub(crate) fn out(&mut self, args: fmt::Arguments<'_>) -> io::Result<()> {

@@ -394,8 +394,10 @@ Inside winsh, `./script.sh arguments...` and named `.sh` files on PATH run in
 an isolated shell initialized from exported environment variables. Their exit,
 directory changes, variables, and functions do not modify the caller. Source
 files explicitly with `. ./library.sh [arguments...]` or `source ./library.sh`
-to share session state. Source filenames resolve against cwd; source does not
-search PATH. Supplied source arguments temporarily replace positional arguments;
+to share session state. A bare source filename is searched in the session's
+PATH, then in its current directory. A filename containing a path separator
+is opened directly. Source files need read access and may have any extension.
+Supplied source arguments temporarily replace positional arguments;
 without arguments it shares the caller's arguments. `return` ends a sourced file.
 
 ~~~sh
@@ -470,6 +472,36 @@ names are case-sensitive. Native exit codes retain 32 bits. Filename matches use
 case-sensitive pattern comparisons and Rust string ordering, rather than Bash
 locale collation. These differences can affect cross-platform scripts.
 
+### Core scripting controls
+
+| Form | Behavior |
+| --- | --- |
+| `command -v name ...` | Print the resolution of each known name. Handles aliases, supported keywords, functions, builtins, bundled utilities, and programs. Returns success when any name resolves. |
+| `command [--] name args...` | Invoke a builtin, utility, or program directly, bypassing a shell function of the same name. |
+| `getopts optstring name [args...]` | Scan the positional parameters or an explicit argument list. Handles grouped short options, attached or separate option arguments, and `--`. Writes the option to `name`, its argument to `OPTARG`, and the next index to `OPTIND`. Returns 1 at the end. |
+| `exec [--] program args...` | End the current shell session with the program's exit status. A successful launch skips the outgoing shell's EXIT action. Native Windows programs run as a child with their own PID. |
+| `exec >log 2>&1` | Keep the redirected streams for subsequent commands. An enclosing subshell isolates the change. Functions and groups restore descriptors temporarily redirected on the invocation. |
+| `trap 'commands' event ...` | Run commands for `EXIT`, `ERR`, `HUP`, `INT`, or `TERM`. Use `trap -p` to inspect handlers, an empty action to ignore an event, and `trap - event` to restore its default. |
+
+In a `getopts` option string, a colon after a letter requires an argument.
+A leading colon enables silent errors. An unknown option sets the result to
+`?`, and a missing argument sets it to `:`. In both cases `OPTARG` holds the
+option letter. Set `OPTIND=1` to restart, or use `local OPTIND=1` inside a
+function to preserve the caller's place in a group of option letters.
+
+`EXIT` runs at normal end of input, explicit exit, and errexit. The handler
+sees the exiting status in `$?` and can replace it with an explicit `exit N`.
+`ERR` follows the same conditional and pipeline exceptions as
+errexit and works independently of `set -e`. A subshell can install its own
+cleanup. When embedding winsh, call `Shell::finish(status, &mut io)` at the
+end of the session, using the same streams as the last command.
+
+Windows console Ctrl+C delivers `INT`. The main shell can also send a signal
+to itself, for example `kill -TERM "$$"`. Handlers run between commands.
+Windows job termination and forced process shutdown can end a process before
+it runs cleanup. The supported descriptor numbers are 0, 1 and 2. Additional
+Bash `exec` flags and the `DEBUG` and `RETURN` trap events are outside this subset.
+
 ## Current limits
 
 This is not a full Bash implementation. Arrays, associative arrays,
@@ -481,7 +513,7 @@ remain pending. The `function name` spelling is unsupported; use `name() { ...; 
 Advanced quoting within parameter default words, combined whitespace/nonwhitespace
 IFS edge cases, and escaped IFS characters in non-raw read are not fully Bash-compatible.
 `return` accepts a nonnegative status. Additional shell options, `shopt`,
-readonly variables, traps, and POSIX special-built-in error rules
+readonly variables and POSIX special-built-in error rules
 are not implemented. Unsupported built-in flags/forms report errors.
 
 Here-strings (`<<<`), process substitution, named
@@ -489,8 +521,8 @@ descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is 
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.
 
-Arbitrary shebang dispatch, CDPATH lookup, configurable prompts, `disown`, and
-shell signal traps remain outside the supported subset.
+Arbitrary shebang dispatch, CDPATH lookup, configurable prompts, and `disown`
+remain outside the supported subset.
 
 ## Following a command through the code
 

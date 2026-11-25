@@ -11,6 +11,7 @@ use crate::{Shell, ShellIo, platform};
 pub(crate) enum Spawned {
     Running(ChildProcess),
     Complete(i32),
+    Failed(i32),
 }
 
 /// A failed host operation must never abandon an already-started native child.
@@ -37,7 +38,11 @@ impl Drop for ChildProcess {
 }
 
 pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io::Result<i32> {
-    match spawn(shell, arguments, io)? {
+    wait(shell, spawn(shell, arguments, io)?)
+}
+
+pub(crate) fn wait(shell: &Shell, process: Spawned) -> io::Result<i32> {
+    match process {
         Spawned::Running(mut child) => {
             if let Some(cancel) = &shell.cancellation {
                 loop {
@@ -56,7 +61,7 @@ pub(crate) fn run(shell: &Shell, arguments: &[OsString], io: &mut ShellIo) -> io
                 child.wait()
             }
         }
-        Spawned::Complete(status) => Ok(status),
+        Spawned::Complete(status) | Spawned::Failed(status) => Ok(status),
     }
 }
 
@@ -73,7 +78,7 @@ pub(crate) fn spawn(
                 "winsh: {}: {error}\n",
                 program.to_string_lossy()
             ))?;
-            return Ok(Spawned::Complete(
+            return Ok(Spawned::Failed(
                 if error.kind() == io::ErrorKind::NotFound {
                     127
                 } else {
@@ -90,7 +95,7 @@ pub(crate) fn spawn(
     {
         if shell.source_depth >= 32 {
             io.err(format_args!("winsh: script nesting limit (32)\n"))?;
-            return Ok(Spawned::Complete(2));
+            return Ok(Spawned::Failed(2));
         }
         let source = match fs::read_to_string(&executable) {
             Ok(source) => source,
@@ -99,19 +104,22 @@ pub(crate) fn spawn(
                     "winsh: {}: {error}\n",
                     program.to_string_lossy()
                 ))?;
-                return Ok(Spawned::Complete(126));
+                return Ok(Spawned::Failed(126));
             }
         };
         let mut child = Shell::with_environment(shell.cwd.clone(), shell.environment.clone())?;
         child.source_depth = shell.source_depth + 1;
         child.cancellation = shell.cancellation.clone();
         child.jobs = shell.jobs.clone();
+        child.traps = shell.traps.script_child();
         child
             .utility_executable
             .clone_from(&shell.utility_executable);
         child.set_arguments(program.clone(), arguments[1..].to_vec());
         let source = source.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-        return Ok(Spawned::Complete(child.run(&source, io)?.status()));
+        let mut streams = io.try_clone()?;
+        let status = child.run(&source, &mut streams)?.status();
+        return Ok(Spawned::Complete(child.finish(status, &mut streams)?));
     }
     // Rust can implicitly invoke cmd.exe for batch files. Defer that separate
     // argument language until we implement and test an explicit batch policy.
@@ -123,7 +131,7 @@ pub(crate) fn spawn(
         io.err(format_args!(
             "winsh: batch files are not supported yet; invoke their interpreter explicitly\n"
         ))?;
-        return Ok(Spawned::Complete(126));
+        return Ok(Spawned::Failed(126));
     }
     let mut child = Command::new(executable);
     child
@@ -143,12 +151,16 @@ pub(crate) fn spawn(
                 program.to_string_lossy()
             ))?;
             // Resolution succeeded; failure to start is an execution failure.
-            Ok(Spawned::Complete(126))
+            Ok(Spawned::Failed(126))
         }
     }
 }
 
 pub(crate) fn resolve(shell: &Shell, program: &OsStr) -> io::Result<PathBuf> {
+    platform::absolute(shell.cwd(), &command_path(shell, program)?)
+}
+
+pub(crate) fn command_path(shell: &Shell, program: &OsStr) -> io::Result<PathBuf> {
     if program.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -156,19 +168,42 @@ pub(crate) fn resolve(shell: &Shell, program: &OsStr) -> io::Result<PathBuf> {
         ));
     }
     let path = Path::new(program);
-    let explicit = path.is_absolute()
-        || path.components().count() > 1
-        || program.as_encoded_bytes().contains(&b'/')
-        || (cfg!(windows) && program.as_encoded_bytes().contains(&b'\\'));
-    if explicit {
-        return candidate(&platform::absolute(&shell.cwd, path)?);
+    let lookup = |absolute: &Path, spelling: &Path| {
+        let found = candidate(absolute)?;
+        Ok(match found.file_name() {
+            Some(name) if Some(name) != spelling.file_name() => spelling.with_file_name(name),
+            _ => spelling.to_owned(),
+        })
+    };
+    if explicit_path(path) {
+        return lookup(&platform::absolute(&shell.cwd, path)?, path);
     }
 
+    search_path(shell, program, lookup)
+}
+
+fn explicit_path(path: &Path) -> bool {
+    let program = path.as_os_str();
+    path.is_absolute()
+        || path.components().count() > 1
+        || program.as_encoded_bytes().contains(&b'/')
+        || (cfg!(windows) && program.as_encoded_bytes().contains(&b'\\'))
+}
+fn search_path<T>(
+    shell: &Shell,
+    program: &OsStr,
+    candidate: impl Fn(&Path, &Path) -> io::Result<T>,
+) -> io::Result<T> {
     let mut failure = None;
-    if let Some(paths) = shell.env("PATH") {
+    if let Some(paths) = shell.var("PATH") {
         for directory in env::split_paths(paths) {
-            let path = platform::absolute(&shell.cwd, &directory)?.join(program);
-            match candidate(&path) {
+            let spelling = if directory.as_os_str().is_empty() {
+                Path::new(".").join(program)
+            } else {
+                directory.join(program)
+            };
+            let path = platform::absolute(&shell.cwd, &spelling)?;
+            match candidate(&path, &spelling) {
                 Ok(path) => return Ok(path),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => failure = Some(error),
@@ -176,6 +211,24 @@ pub(crate) fn resolve(shell: &Shell, program: &OsStr) -> io::Result<PathBuf> {
         }
     }
     Err(failure.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "command not found")))
+}
+
+pub(crate) fn source_file(shell: &Shell, name: &OsStr) -> io::Result<fs::File> {
+    let path = Path::new(name);
+    if !explicit_path(path) && !name.is_empty() {
+        match search_path(shell, name, |p, _| {
+            if fs::metadata(p)?.is_file() {
+                fs::File::open(p)
+            } else {
+                Err(io::ErrorKind::NotFound.into())
+            }
+        }) {
+            Ok(found) => return Ok(found),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    fs::File::open(platform::absolute(shell.cwd(), path)?)
 }
 
 fn candidate(path: &Path) -> io::Result<PathBuf> {

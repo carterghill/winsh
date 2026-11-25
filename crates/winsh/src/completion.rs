@@ -23,7 +23,7 @@ impl Shell {
     pub fn completion_context(&self) -> CompletionContext {
         CompletionContext {
             cwd: self.cwd.clone(),
-            path: self.env("PATH").map(ToOwned::to_owned),
+            path: self.var("PATH").map(ToOwned::to_owned),
             home: self.home().map(PathBuf::from),
             session_commands: self
                 .functions

@@ -268,10 +268,13 @@ fn winsh_interactive_smoke() {
     harness.wait_for("> pending-input");
     harness.session.write(vec![3]).unwrap();
     wait_for_prompt(&harness);
+    harness.enter(r#"trap 'echo trapped-"interrupt"' INT"#);
     harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("foreground-" + "ready"); Start-Sleep 60'"#);
     harness.wait_for("foreground-ready");
     harness.session.write(vec![3]).unwrap();
+    harness.wait_for("trapped-interrupt");
     wait_for_prompt(&harness);
+    harness.enter("trap - INT");
     harness.enter(
         r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("after-" + "interrupt")'"#,
     );

@@ -118,13 +118,12 @@ fn run() -> io::Result<i32> {
         return utility.run(&shell, &args, &mut streams);
     }
     let interactive = io::stdin().is_terminal();
-    let _handler = if interactive {
+    if interactive {
         shell.set_utility_executable(env::current_exe()?);
-        Some(console::Handler::install()?)
-    } else {
-        None
-    };
-    match mode {
+    }
+    shell.observe_signals();
+    let _handler = console::Handler::install()?;
+    let status = match mode {
         Mode::Command(source, mut arguments) => {
             let arg0 = if arguments.is_empty() {
                 "winsh".into()
@@ -150,7 +149,7 @@ fn run() -> io::Result<i32> {
             if interactive {
                 shell.enable_interactive_jobs();
                 if let Outcome::Exit(status) = shell.load_interactive_profile(&mut streams)? {
-                    return Ok(status);
+                    return shell.finish(status, &mut streams);
                 }
             }
             if interactive && let Ok(label) = env::var("WINSH_DEV_BUILD") {
@@ -159,7 +158,8 @@ fn run() -> io::Result<i32> {
             input_loop(&mut shell, &mut streams, interactive)
         }
         Mode::Utility(..) | Mode::JobWorker | Mode::Help | Mode::Version => unreachable!(),
-    }
+    }?;
+    shell.finish(status, &mut streams)
 }
 
 fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io::Result<i32> {
@@ -173,7 +173,9 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
         let read = input.read_line(shell, &pending, &mut line);
         if matches!(&read, Err(error) if error.kind() == io::ErrorKind::Interrupted) {
             pending.clear();
-            shell.interrupt();
+            if let Outcome::Exit(status) = shell.interrupt_input(streams)? {
+                return Ok(status);
+            }
             continue;
         }
         if read? == 0 {

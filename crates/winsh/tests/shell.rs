@@ -722,6 +722,32 @@ fn sourcing_shares_state_and_restores_function_arguments_and_locals() {
 }
 
 #[test]
+fn source_searches_session_path_before_cwd_and_accepts_nonexecutables() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.root.0.join("lib")).unwrap();
+    fs::write(f.root.0.join("settings"), "value=cwd").unwrap();
+    fs::write(f.root.0.join("lib/settings"), "value=$1; return 6").unwrap();
+    fs::write(f.root.0.join("fallback"), "value=fallback").unwrap();
+    assert_eq!(f.run("PATH=lib; . settings path; echo \"$?:$value\"; source -- ./settings; echo $value; . fallback; echo $value").status(), 0);
+    assert_eq!(f.out(), "6:path\ncwd\nfallback\n");
+}
+
+#[test]
+fn exec_commits_descriptors_and_finishes_only_the_current_session() {
+    let mut f = Fixture::new();
+    let child = quote(helper());
+    f.run("trap 'echo cleanup:$?' EXIT; exec >log 2>&1");
+    f.run("f(){ exec >other; echo inner; }; f >temporary; (exec >sub; echo sub); echo after >&2");
+    let outcome = f.run(&format!("exec {child} status 127; echo bad"));
+    assert_eq!(outcome, Outcome::Exit(127));
+    assert_eq!(f.shell.finish(outcome.status(), &mut f.io).unwrap(), 127);
+    assert_eq!(fs::read(f.root.0.join("log")).unwrap(), b"after\n");
+    assert_eq!(fs::read(f.root.0.join("other")).unwrap(), b"inner\n");
+    assert_eq!(fs::read(f.root.0.join("sub")).unwrap(), b"sub\n");
+    assert_eq!(fs::read(f.root.0.join("temporary")).unwrap(), b"");
+}
+
+#[test]
 fn direct_scripts_are_isolated_and_can_be_pipeline_stages() {
     let mut f = Fixture::new();
     let path = f.root.0.join("worker.sh");
@@ -1855,6 +1881,12 @@ fn redirections_and_pipelines_match_bash() {
         "PATH=/usr/bin:/bin; grep -Fc missing a".to_owned(),
         "cd missing 1>a 2>&1-".to_owned(),
         ">a".to_owned(),
+        "mkdir lib; printf 'echo from-path:$1; return 3\\n' >lib/library; printf 'echo from-cwd\\n' >library; PATH=lib; . library arg; echo $?; source -- ./library".to_owned(),
+        "exec >b 2>&1; echo start; { exec >a; echo inside; } >input; (exec >a; echo sub); echo after >&2".to_owned(),
+        "printf '# empty\\n' >a; false; . ./a; echo $?; printf 'echo $?\\n' >a; false; . ./a".to_owned(),
+        format!("cp {child} probe.exe; PATH=.; command -v ./probe.exe probe.exe"),
+        format!("trap 'echo bad' EXIT; exec {child} both >a 2>b; echo bad"),
+        format!("found=$(command -v {child}) && command \"$found\" status 7"),
         "out=a; out=b >\"$out\"; printf '<%s>\\n' \"$(<a)\" \"$(0<b)\"".to_owned(),
         "out=a; out=b printf data >\"$out\"; echo \"$out\"".to_owned(),
         "printf 'first\\nsecond\\n\\n' >a; f=a; v=$(<\"$f\"); printf '<%s>\\n' \"$v\" \"$(<a; :)\""

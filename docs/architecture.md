@@ -167,6 +167,11 @@ no shell framework, async runtime, or GUI toolkit dependency.
 8. **Implemented:** extend the scripting subset with `case` pattern matching
    and `<<` / `<<-` here-documents. Bash comparison fixtures cover pattern
    quoting, fallthrough, delimiter quoting, expansion, and redirection order.
+9. **Core scripting controls implemented.** Scripts can use `set -euo pipefail`,
+   locate commands with `command -v`, parse options with `getopts`, source
+   libraries through PATH, retain redirections or end with `exec`, and register
+   cleanup and error handlers with `trap`. See the
+   [supported forms and Windows signal behavior](shell.md#core-scripting-controls).
 
 Test behavior at the lowest useful level: pure parser tests, engine tests with
 explicit state and I/O, and Windows integration tests for processes and

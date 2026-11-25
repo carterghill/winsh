@@ -32,7 +32,9 @@ pub fn read_line_unbuffered(input: &mut File, line: &mut String) -> io::Result<u
                     break;
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted && !bytes.is_empty() => {
+                continue;
+            }
             Err(error) => return Err(error),
         }
     }
@@ -52,8 +54,8 @@ mod windows {
     use windows_sys::Win32::{
         Foundation::{ERROR_OPERATION_ABORTED, GetLastError, SetLastError},
         System::Console::{
-            CONSOLE_READCONSOLE_CONTROL, CTRL_BREAK_EVENT, CTRL_C_EVENT, GetStdHandle,
-            ReadConsoleW, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
+            CONSOLE_READCONSOLE_CONTROL, CTRL_BREAK_EVENT, CTRL_C_EVENT, GetConsoleCP,
+            GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
         },
     };
 
@@ -68,10 +70,14 @@ mod windows {
         1
     }
 
-    pub struct Handler;
+    pub struct Handler(bool);
 
     impl Handler {
         pub fn install() -> io::Result<Self> {
+            // SAFETY: GetConsoleCP queries this process's console association.
+            if unsafe { GetConsoleCP() } == 0 {
+                return Ok(Self(false));
+            }
             // SAFETY: clear an inherited ignore-Ctrl+C attribute. Registering a
             // callback alone does not clear it, and children would inherit it.
             if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
@@ -83,13 +89,16 @@ mod windows {
             if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
                 Err(io::Error::last_os_error())
             } else {
-                Ok(Self)
+                Ok(Self(true))
             }
         }
     }
 
     impl Drop for Handler {
         fn drop(&mut self) {
+            if !self.0 {
+                return;
+            }
             // SAFETY: unregister the same static function installed above.
             unsafe { SetConsoleCtrlHandler(Some(handler), 0) };
         }
@@ -143,13 +152,55 @@ mod windows {
     }
 }
 
-#[cfg(not(windows))]
-pub struct Handler;
-
-#[cfg(not(windows))]
-impl Handler {
-    pub fn install() -> io::Result<Self> {
-        Ok(Self)
+#[cfg(unix)]
+pub use unix::Handler;
+#[cfg(unix)]
+#[allow(unsafe_code)]
+mod unix {
+    use std::io;
+    pub struct Handler(Vec<(i32, libc::sigaction)>);
+    extern "C" fn signal(number: i32) {
+        if number == libc::SIGINT {
+            winsh::interrupt_foreground();
+        } else {
+            winsh::notify_signal(number);
+        }
+    }
+    impl Handler {
+        pub fn install() -> io::Result<Self> {
+            let mut handler = Self(Vec::new());
+            for number in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+                // SAFETY: sigaction fills old; action is initialized with a valid
+                // C signal handler and an empty mask. The handler only updates atomics.
+                unsafe {
+                    let mut old = std::mem::zeroed::<libc::sigaction>();
+                    if libc::sigaction(number, std::ptr::null(), &mut old) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if old.sa_sigaction == libc::SIG_IGN {
+                        continue;
+                    }
+                    let mut action = std::mem::zeroed::<libc::sigaction>();
+                    action.sa_sigaction = signal as *const () as usize;
+                    libc::sigemptyset(&mut action.sa_mask);
+                    if libc::sigaction(number, &action, std::ptr::null_mut()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    handler.0.push((number, old));
+                }
+            }
+            Ok(handler)
+        }
+    }
+    impl Drop for Handler {
+        fn drop(&mut self) {
+            for (number, old) in &self.0 {
+                // SAFETY: restore the exact previous disposition recorded above.
+                unsafe {
+                    libc::sigaction(*number, old, std::ptr::null_mut());
+                }
+            }
+        }
     }
 }
 

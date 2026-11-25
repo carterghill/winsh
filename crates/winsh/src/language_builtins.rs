@@ -7,7 +7,8 @@ use std::{
 
 pub(crate) const NAMES: &[&str] = &[
     ":", "true", "false", "echo", "printf", "test", "[", "export", "unset", "local", "set",
-    "shift", "return", "break", "continue", ".", "source", "read",
+    "shift", "return", "break", "continue", ".", "source", "read", "command", "getopts", "trap",
+    "exec",
 ];
 pub(crate) fn dispatch(
     shell: &mut Shell,
@@ -16,6 +17,10 @@ pub(crate) fn dispatch(
     io: &mut ShellIo,
 ) -> io::Result<Outcome> {
     let status = match name {
+        "command" => return crate::controls::command(shell, args, io),
+        "getopts" => return crate::controls::getopts(shell, args, io),
+        "trap" => return crate::traps::builtin(shell, args, io),
+        "exec" => return crate::controls::exec(shell, args, io),
         ":" | "true" => 0,
         "false" => 1,
         "echo" => {
@@ -177,10 +182,11 @@ pub(crate) fn dispatch(
             if shell.source_depth >= 64 {
                 return fail(io, name, "source nesting limit (64)", 2);
             }
+            let args = args.strip_prefix(&[OsString::from("--")]).unwrap_or(args);
             let Some(file) = args.first() else {
                 return fail(io, name, "filename required", 2);
             };
-            let source = match fs::read_to_string(shell.cwd().join(file)) {
+            let source = match crate::exec::source_file(shell, file).and_then(io::read_to_string) {
                 Ok(s) => s,
                 Err(e) => return fail(io, name, e, 1),
             };
@@ -212,7 +218,7 @@ pub(crate) fn dispatch(
     };
     Ok(Outcome::Continue(status))
 }
-fn fail(
+pub(crate) fn fail(
     io: &mut ShellIo,
     name: &str,
     message: impl std::fmt::Display,

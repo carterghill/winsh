@@ -29,6 +29,7 @@ static INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
 static STOPS: AtomicUsize = AtomicUsize::new(0);
 /// Notify an active foreground wait from the CLI console handler.
 pub fn interrupt_foreground() {
+    crate::traps::notify_signal(2);
     INTERRUPTS.fetch_add(1, Ordering::Relaxed);
 }
 pub fn stop_foreground() {
@@ -253,6 +254,8 @@ struct Request {
     aliases: BTreeMap<String, crate::aliases::Alias>,
     args: Vec<OsString>,
     arg0: OsString,
+    opt_offset: usize,
+    trap_listing: BTreeMap<crate::traps::Event, String>,
     status: i32,
     last_pid: Option<u32>,
     shell_pid: u32,
@@ -344,6 +347,13 @@ impl Shell {
             Input::Terminal => streams.with_stdin(os::terminal_input()?),
             Input::Descriptor(fd) => streams.with_stdin(os::received_input(fd)?),
         };
+        // A worker continues the parent's option scan. Shell::new initialized
+        // fresh values for these names, including any that were exported.
+        for name in ["OPTIND", "OPTERR"] {
+            if let Some(value) = std::env::var_os(name) {
+                self.set_env(name, value);
+            }
+        }
         self.variables = request.variables;
         self.unassigned_exports = request.unassigned_exports;
         self.options = request.options;
@@ -351,6 +361,8 @@ impl Shell {
         self.functions = request.functions;
         self.aliases = request.aliases;
         self.set_arguments(request.arg0, request.args);
+        self.opt_offset = request.opt_offset;
+        self.traps.inherit(request.trap_listing);
         self.last_status = request.status;
         self.jobs.last_pid = request.last_pid;
         self.shell_pid = request.shell_pid;
@@ -364,13 +376,14 @@ impl Shell {
             self.scopes.push(BTreeMap::new());
         }
         self.utility_executable = request.utilities;
-        match request.task {
+        let status = match request.task {
             Task::List(list) => Ok(self
                 .execute_script(&Script { lists: vec![list] }, &mut streams)?
                 .status()),
             Task::Pipeline(p) => Ok(self.evaluate_pipeline(&p, &mut streams)?.status()),
             Task::Program { args, .. } => exec::run(self, &args, &mut streams),
-        }
+        }?;
+        self.finish(status, &mut streams)
     }
     pub(crate) fn launch_list(
         &mut self,
@@ -395,7 +408,9 @@ impl Shell {
         io: &mut ShellIo,
     ) -> io::Result<i32> {
         if !self.jobs.interactive {
-            return exec::run(self, args, io);
+            let status = exec::run(self, args, io)?;
+            self.foreground_completed(status);
+            return Ok(status);
         }
         let display = if utility.is_some() { &args[2..] } else { args };
         let relay_input = cfg!(windows) && utility.is_some_and(|u| u.reads_stdin(&display[1..]));
@@ -563,6 +578,12 @@ impl Shell {
             options: self.options,
             ignore_errexit: self.ignore_errexit,
             arg0: self.arg0.clone(),
+            opt_offset: self.opt_offset,
+            trap_listing: if shell_task {
+                self.traps.listing().clone()
+            } else {
+                BTreeMap::new()
+            },
             status: self.last_status,
             last_pid: self.jobs.last_pid,
             shell_pid: self.shell_pid,

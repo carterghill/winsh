@@ -13,6 +13,66 @@ fn run(source: &str) -> Output {
 }
 fn cases() -> Vec<(&'static str, &'static str, i32)> {
     vec![
+        (
+            "f(){ :; }; command -v if printf f missing_winsh_command; echo $?; command -v missing_winsh_command || echo absent; echo(){ printf shadow; }; command -- echo actual",
+            "if\nprintf\nf\n0\nabsent\nactual\n",
+            0,
+        ),
+        (
+            "set -- -ab -cfoo -c 'two words' -x -- tail; while getopts :abc: o; do echo \"$o:$OPTIND:${OPTARG-unset}\"; done; echo \"$o:$OPTIND:${OPTARG-unset}\"",
+            "a:1:unset\nb:2:unset\nc:3:foo\nc:5:two words\n?:6:x\n?:7:unset\n",
+            0,
+        ),
+        (
+            "getopts ':ab:' o -b; echo \"$?:$o:$OPTIND:$OPTARG\"; OPTIND=1; getopts a o -a; echo \"$o:$OPTIND:${OPTARG-unset}\"; OPTIND=1; OPTERR=0; getopts a o -z; echo \"$?:$o:${OPTARG-unset}\"",
+            "0:::2:b\na:2:unset\n0:?:unset\n",
+            0,
+        ),
+        (
+            "set -- -abc; getopts abc o; f(){ local OPTIND=1; getopts xy c -xy; }; f; getopts abc o; echo $o:$OPTIND; OPTIND=1; getopts abc o; echo $o:$OPTIND",
+            "b:1\na:1\n",
+            0,
+        ),
+        (
+            "set -- -ab -cd; export OPTIND=2 OPTERR=0; getopts abcd o; { getopts abcd o; echo $o:$OPTIND:$OPTERR; } & wait",
+            "d:3:0\n",
+            0,
+        ),
+        (
+            "trap 'echo exit:$?' EXIT; (trap 'echo sub:$?' EXIT; exit 7); x=$(trap 'echo C:$?' EXIT; exit 2); echo \"$?:$x\"; exit 3",
+            "sub:7\n2:C:2\nexit:3\n",
+            3,
+        ),
+        (
+            "trap 'echo prior:$?; exit 14' EXIT; exit 7",
+            "prior:7\n",
+            14,
+        ),
+        (
+            "trap 'echo cleanup:$?' EXIT; { exec winsh_missing_exec_target; } 2>&-; echo bad",
+            "cleanup:127\n",
+            127,
+        ),
+        (
+            "trap 'echo err:$?' ERR; false; echo status:$?; ! true; false && echo bad; f(){ false; }; f; true",
+            "err:1\nstatus:1\nerr:1\n",
+            0,
+        ),
+        (
+            "set -e -o pipefail; trap 'echo failed:$?' ERR; trap 'echo exit:$?' EXIT; (exit 9) | true; echo bad",
+            "failed:9\nexit:9\n",
+            9,
+        ),
+        (
+            "trap 'echo caught:$?' INT TERM; kill -INT $$; kill -TERM $$; trap '' TERM; kill -TERM $$; echo ok",
+            "caught:0\ncaught:0\nok\n",
+            0,
+        ),
+        (
+            "trap 'echo cleanup' EXIT; saved=$(trap -p EXIT); trap - EXIT; echo \"$saved\"; trap -p EXIT",
+            "trap -- 'echo cleanup' EXIT\n",
+            0,
+        ),
         ("set -euo pipefail; false; echo continued", "", 1),
         (
             "set -e; f(){ return 3; }; if f; then :; else echo \"$?\"; fi; ! ! false; echo continued",

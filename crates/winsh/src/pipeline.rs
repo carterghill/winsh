@@ -35,7 +35,7 @@ pub(crate) fn run(shell: &Shell, pipeline: &ScriptPipeline, streams: &ShellIo) -
             workers.push(scope.spawn(move || {
                 let result = session
                     .command(command, &mut io, pipe_stderr)
-                    .map(Outcome::status);
+                    .and_then(|outcome| session.finish(outcome.status(), &mut io));
                 if result.is_err() {
                     cancellation.store(true, std::sync::atomic::Ordering::Relaxed);
                 }

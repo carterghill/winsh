@@ -1883,6 +1883,7 @@ fn redirections_and_pipelines_match_bash() {
         ">a".to_owned(),
         "mkdir lib; printf 'echo from-path:$1; return 3\\n' >lib/library; printf 'echo from-cwd\\n' >library; PATH=lib; . library arg; echo $?; source -- ./library".to_owned(),
         "exec >b 2>&1; echo start; { exec >a; echo inside; } >input; (exec >a; echo sub); echo after >&2".to_owned(),
+        "v=outer; f() { local v=inner; trap 'echo \"$?:$v:$1\"' EXIT; exit 3 >b; }; f arg >a".to_owned(),
         "printf '# empty\\n' >a; false; . ./a; echo $?; printf 'echo $?\\n' >a; false; . ./a".to_owned(),
         format!("cp {child} probe.exe; PATH=.; command -v ./probe.exe probe.exe"),
         format!("trap 'echo bad' EXIT; exec {child} both >a 2>b; echo bad"),

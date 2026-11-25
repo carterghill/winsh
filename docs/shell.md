@@ -444,7 +444,7 @@ membership. Extended glob patterns such as `@(one|two)` are outside this subset.
 | --- | --- |
 | `:` / `true` / `false` | Return success, success, or failure. |
 | `echo [-n] [words...]` | Join words with spaces; `-n` suppresses the newline. Use printf for escapes. |
-| `printf format [values...]` | Repeating format with `%s`, `%b`, `%d`, `%i`, `%u`, `%x`, `%X`, `%o`, `%%`; basic backslash escapes including `\n`, `\t`, and `\\`. Width/precision and other formats are unsupported. |
+| `printf format [values...]` | Repeats the format over the supplied values. Supports `%s`, `%b`, `%d`, `%i`, `%u`, `%x`, `%X`, `%o`, `%%`, and basic backslash escapes including `\n`, `\t`, and `\\`. Numeric operands accept an optional sign and decimal, leading-zero octal, or `0x` hexadecimal notation. Width/precision and other formats are unsupported. |
 | `test` / `[` | Empty/nonempty strings; `-n`, `-z`, `-e`, `-f`, `-d`, `-s`; string `=`, `==`, `!=`, `<`, `>`; integer `-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`; leading `!`. `[` requires `]`. Combine tests with shell `&&` / `||`. Quote `<` and `>`. |
 | `read [-r] [names...]` | Read one UTF-8 LF-terminated line without reading ahead. With no names, set REPLY; otherwise split using IFS, with the final name receiving remaining fields. `-r` preserves backslashes. EOF returns 1, including a final partial line. |
 | `set -- [arguments...]` | Replace positional arguments. |
@@ -487,10 +487,15 @@ In a `getopts` option string, a colon after a letter requires an argument.
 A leading colon enables silent errors. An unknown option sets the result to
 `?`, and a missing argument sets it to `:`. In both cases `OPTARG` holds the
 option letter. Set `OPTIND=1` to restart, or use `local OPTIND=1` inside a
-function to preserve the caller's place in a group of option letters.
+function to preserve the caller's place in a group of option letters. If
+`getopts` has read `a` from the first argument `-ab`, then `OPTIND=1 true`
+makes the next call read `a` again. A prefix on `getopts` itself, such as
+`OPTIND=1 getopts ab opt`, writes the resulting index back to the caller.
 
 `EXIT` runs at normal end of input, explicit exit, and errexit. The handler
 sees the exiting status in `$?` and can replace it with an explicit `exit N`.
+When a function calls `exit`, the handler can use that function's local variables,
+positional arguments, and active redirections.
 `ERR` follows the same conditional and pipeline exceptions as
 errexit and works independently of `set -e`. A subshell can install its own
 cleanup. When embedding winsh, call `Shell::finish(status, &mut io)` at the

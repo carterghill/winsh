@@ -81,6 +81,62 @@ pub(crate) fn command(
     }
 }
 
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OptionScan {
+    // Zero requests a fresh scan on the next getopts call.
+    pub(crate) index: usize,
+    group: String,
+    offset: usize,
+}
+
+impl OptionScan {
+    pub(crate) fn assign_index(&mut self, value: &OsStr) {
+        // A temporary binding can be restored before another option is read.
+        // Discard pending letters only when next() actually starts a fresh scan.
+        self.index = value.to_str().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if self.index == 1 {
+            self.index = 0;
+        }
+    }
+
+    fn next(&mut self, argv: &[OsString]) -> Option<char> {
+        if self.index == 0 {
+            self.index = 1;
+            self.group.clear();
+        }
+        self.index = self.index.min(argv.len() + 1);
+        if self.group.is_empty() {
+            let arg = argv.get(self.index - 1)?.to_str()?;
+            if arg == "--" {
+                self.index += 1;
+                return None;
+            }
+            let flags = arg.strip_prefix('-').filter(|s| !s.is_empty())?;
+            self.group.push_str(flags);
+            self.offset = 0;
+        }
+        let ch = self.group[self.offset..].chars().next()?;
+        self.offset += ch.len_utf8();
+        if self.offset == self.group.len() {
+            self.group.clear();
+            self.index += 1;
+        }
+        Some(ch)
+    }
+
+    fn argument(&mut self, argv: &[OsString]) -> Option<OsString> {
+        let value = if self.group.is_empty() {
+            argv.get(self.index - 1)?.clone()
+        } else {
+            let remainder = self.group[self.offset..].into();
+            self.group.clear();
+            remainder
+        };
+        self.index += 1;
+        Some(value)
+    }
+}
+
 pub(crate) fn getopts(
     shell: &mut Shell,
     args: &[OsString],
@@ -100,43 +156,16 @@ pub(crate) fn getopts(
     } else {
         explicit
     };
-    let mut index = shell
-        .var("OPTIND")
-        .and_then(OsStr::to_str)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(1)
-        .clamp(1, argv.len() + 1);
-    let mut offset = shell.opt_offset;
     let mut option = '?';
     let mut optarg = None;
-    let mut done = true;
-    if let Some(arg) = argv.get(index - 1).and_then(|a| a.to_str()) {
-        if arg == "--" {
-            index += 1;
-        } else if let Some(flags) = arg.strip_prefix('-').filter(|s| !s.is_empty()) {
-            let tail = flags
-                .get(offset..)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(flags);
-            let ch = tail.chars().next().unwrap();
-            let rest = &tail[ch.len_utf8()..];
-            done = false;
-            offset = flags.len() - rest.len();
-            if rest.is_empty() {
-                index += 1;
-                offset = 0;
-            }
-            if let Some((_, after)) = spec.split_once(ch).filter(|_| ch != ':') {
-                option = ch;
-                if after.starts_with(':') {
-                    if !rest.is_empty() {
-                        optarg = Some(rest.into());
-                        index += 1;
-                        offset = 0;
-                    } else if let Some(next) = argv.get(index - 1) {
-                        optarg = Some(next.clone());
-                        index += 1;
-                    } else if silent {
+    let next = shell.option_scan.next(argv);
+    if let Some(ch) = next {
+        if let Some((_, after)) = spec.split_once(ch).filter(|_| ch != ':') {
+            option = ch;
+            if after.starts_with(':') {
+                optarg = shell.option_scan.argument(argv);
+                if optarg.is_none() {
+                    if silent {
                         option = ':';
                         optarg = Some(ch.to_string().into());
                     } else {
@@ -148,17 +177,14 @@ pub(crate) fn getopts(
                         }
                     }
                 }
-            } else if silent {
-                optarg = Some(ch.to_string().into());
-            } else if shell.var("OPTERR") != Some(OsStr::new("0")) {
-                io.err(format_args!("winsh: getopts: illegal option -- {ch}\n"))?;
             }
+        } else if silent {
+            optarg = Some(ch.to_string().into());
+        } else if shell.var("OPTERR") != Some(OsStr::new("0")) {
+            io.err(format_args!("winsh: getopts: illegal option -- {ch}\n"))?;
         }
     }
-    shell.set_var("OPTIND", index.to_string().into());
-    if !done {
-        shell.opt_offset = offset;
-    }
+    shell.publish_optind();
     match optarg {
         Some(value) => shell.set_var("OPTARG", value),
         None => shell.unset("OPTARG"),
@@ -167,7 +193,7 @@ pub(crate) fn getopts(
         return fail(io, "getopts", "invalid variable name", 1);
     };
     shell.set_var(name, option.to_string().into());
-    Ok(Outcome::Continue(i32::from(done)))
+    Ok(Outcome::Continue(i32::from(next.is_none())))
 }
 
 pub(crate) fn exec(shell: &mut Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<Outcome> {

@@ -1,4 +1,4 @@
-use crate::{Outcome, Shell, ShellIo, language_builtins::fail};
+use crate::{Outcome, Shell, ShellIo, language_builtins::fail, shell::Flow};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -210,12 +210,16 @@ impl Shell {
         let flow = self.flow.take();
         let result = self.run(&action, io);
         self.traps.active &= !event.bit();
-        if self.flow.is_none() {
-            self.flow = flow;
-        }
-        let outcome = match result? {
-            Outcome::Exit(code) => Outcome::Exit(code),
-            Outcome::Continue(_) => Outcome::Continue(status),
+        let action_flow = self.flow.take();
+        self.flow = if event == Event::Exit {
+            flow
+        } else {
+            action_flow.or(flow)
+        };
+        let outcome = match (result?, action_flow) {
+            (Outcome::Exit(code), _) => Outcome::Exit(code),
+            (_, Some(Flow::Return(code))) if event == Event::Exit => Outcome::Exit(code),
+            _ => Outcome::Continue(status),
         };
         Ok(self.record(outcome))
     }

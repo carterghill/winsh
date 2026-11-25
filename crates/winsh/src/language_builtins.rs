@@ -86,7 +86,7 @@ pub(crate) fn dispatch(
                     return fail(io, name, "invalid identifier", 1);
                 }
                 if name == "local" {
-                    let saved = shell.save_var(key);
+                    let saved = shell.save_local(key);
                     if let std::collections::btree_map::Entry::Vacant(entry) =
                         shell.scopes.last_mut().unwrap().entry(key.into())
                     {
@@ -321,17 +321,20 @@ fn printf(args: &[OsString], io: &mut ShellIo) -> Result<(), String> {
                         out
                     }
                     'd' | 'i' | 'u' | 'x' | 'X' | 'o' => {
-                        let value: i64 = if text.is_empty() {
+                        let value = if text.is_empty() {
                             0
                         } else {
-                            text.parse().map_err(|_| "numeric argument required")?
+                            crate::arithmetic::integer_literal(text.trim_start())
+                                .ok_or("numeric argument required")?
                         };
                         match spec {
-                            'x' => format!("{value:x}"),
-                            'X' => format!("{value:X}"),
-                            'o' => format!("{value:o}"),
+                            'x' => format!("{:x}", value as u64),
+                            'X' => format!("{:X}", value as u64),
+                            'o' => format!("{:o}", value as u64),
                             'u' => (value as u64).to_string(),
-                            _ => value.to_string(),
+                            _ => i64::try_from(value)
+                                .map_err(|_| "numeric argument out of range")?
+                                .to_string(),
                         }
                     }
                     _ => return Err(format!("unsupported format specifier %{spec}")),

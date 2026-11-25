@@ -254,7 +254,7 @@ struct Request {
     aliases: BTreeMap<String, crate::aliases::Alias>,
     args: Vec<OsString>,
     arg0: OsString,
-    opt_offset: usize,
+    option_scan: crate::controls::OptionScan,
     trap_listing: BTreeMap<crate::traps::Event, String>,
     status: i32,
     last_pid: Option<u32>,
@@ -361,7 +361,7 @@ impl Shell {
         self.functions = request.functions;
         self.aliases = request.aliases;
         self.set_arguments(request.arg0, request.args);
-        self.opt_offset = request.opt_offset;
+        self.option_scan = request.option_scan;
         self.traps.inherit(request.trap_listing);
         self.last_status = request.status;
         self.jobs.last_pid = request.last_pid;
@@ -578,7 +578,7 @@ impl Shell {
             options: self.options,
             ignore_errexit: self.ignore_errexit,
             arg0: self.arg0.clone(),
-            opt_offset: self.opt_offset,
+            option_scan: self.option_scan.clone(),
             trap_listing: if shell_task {
                 self.traps.listing().clone()
             } else {

@@ -151,23 +151,23 @@ fn cd(shell: &mut Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<Outc
     Ok(Outcome::Continue(0))
 }
 
-fn exit(shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<Outcome> {
+fn exit(shell: &mut Shell, args: &[OsString], io: &mut ShellIo) -> io::Result<Outcome> {
     let args = args.strip_prefix(&[OsString::from("--")]).unwrap_or(args);
-    let Some(value) = args.first() else {
-        return Ok(Outcome::Exit(shell.last_status()));
+    let status = if let Some((value, rest)) = args.split_first() {
+        let Some(status) = value.to_str().and_then(|s| s.trim().parse::<i64>().ok()) else {
+            io.err(format_args!(
+                "winsh: exit: {}: numeric argument required\n",
+                value.to_string_lossy()
+            ))?;
+            return Ok(Outcome::Exit(2));
+        };
+        if !rest.is_empty() {
+            return fail(io, "exit", "too many arguments", 1);
+        }
+        status.rem_euclid(256) as i32
+    } else {
+        shell.last_status()
     };
-    let Some(status) = value
-        .to_str()
-        .and_then(|value| value.trim().parse::<i64>().ok())
-    else {
-        io.err(format_args!(
-            "winsh: exit: {}: numeric argument required\n",
-            value.to_string_lossy()
-        ))?;
-        return Ok(Outcome::Exit(2));
-    };
-    if args.len() > 1 {
-        return fail(io, "exit", "too many arguments", 1);
-    }
-    Ok(Outcome::Exit(status.rem_euclid(256) as i32))
+    // Explicit exit runs cleanup while function locals, arguments and redirects are in scope.
+    Ok(Outcome::Exit(shell.finish(status, io)?))
 }

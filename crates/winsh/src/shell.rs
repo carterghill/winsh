@@ -1,5 +1,7 @@
 use crate::{
-    ShellIo, Utility, builtins, expand, pipeline, platform, redirect,
+    ShellIo, Utility, builtins,
+    controls::OptionScan,
+    expand, pipeline, platform, redirect,
     streams::Stream,
     syntax::{self, Command, CommandKind, Script, ScriptPipeline, Word, WordPartKind},
 };
@@ -35,7 +37,7 @@ pub(crate) struct SavedVariable {
     value: Option<OsString>,
     exported: Option<OsString>,
     export_on_assignment: bool,
-    opt_offset: usize,
+    option_scan: Option<OptionScan>,
 }
 
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
@@ -59,7 +61,9 @@ pub struct Shell {
     pub(crate) functions: BTreeMap<String, Command>,
     pub(crate) aliases: BTreeMap<String, crate::aliases::Alias>,
     pub(crate) positional: Vec<OsString>,
-    pub(crate) opt_offset: usize,
+    pub(crate) option_scan: OptionScan,
+    // Binding to reinstate after the current command's OPTIND prefix.
+    command_optind: Option<SavedVariable>,
     pub(crate) traps: crate::traps::Traps,
     pub(crate) arg0: OsString,
     pub(crate) flow: Option<Flow>,
@@ -103,7 +107,8 @@ impl Shell {
             functions: BTreeMap::new(),
             aliases: BTreeMap::new(),
             positional: Vec::new(),
-            opt_offset: 0,
+            option_scan: OptionScan::default(),
+            command_optind: None,
             traps: Default::default(),
             arg0: "winsh".into(),
             flow: None,
@@ -448,9 +453,33 @@ impl Shell {
             Ok(p) => p,
             Err(error) => return self.expansion_failure(error, io),
         };
+        let binding = (!arguments.is_empty()
+            && assignments.iter().any(|(name, _, _)| name == "OPTIND"))
+        .then(|| self.save_var("OPTIND"));
+        let enclosing = std::mem::replace(&mut self.command_optind, binding);
+        let outcome = self.invoke_with_assignments(
+            &arguments,
+            assignments,
+            &simple.redirections,
+            io,
+            pipe_stderr,
+        );
+        if let Some(binding) = std::mem::replace(&mut self.command_optind, enclosing) {
+            self.restore_var("OPTIND", binding);
+        }
+        outcome
+    }
+    fn invoke_with_assignments(
+        &mut self,
+        arguments: &[OsString],
+        assignments: Vec<(String, Word, bool)>,
+        redirections: &[syntax::Redirection],
+        io: &mut ShellIo,
+        pipe_stderr: bool,
+    ) -> io::Result<Outcome> {
         let temporary = !arguments.is_empty();
         if temporary {
-            if let Some(failure) = redirect::apply(self, &simple.redirections, io)? {
+            if let Some(failure) = redirect::apply(self, redirections, io)? {
                 return Ok(failure);
             }
             if pipe_stderr {
@@ -459,7 +488,7 @@ impl Shell {
         }
         let mut saved = BTreeMap::new();
         for (name, word, append) in assignments {
-            if temporary {
+            if temporary && name != "OPTIND" {
                 saved
                     .entry(name.clone())
                     .or_insert_with(|| self.save_var(&name));
@@ -486,10 +515,10 @@ impl Shell {
                 self.set_var(&name, joined);
             }
         }
-        if !temporary && let Some(failure) = redirect::apply(self, &simple.redirections, io)? {
+        if !temporary && let Some(failure) = redirect::apply(self, redirections, io)? {
             return Ok(failure);
         }
-        let outcome = self.invoke(&arguments, io);
+        let outcome = self.invoke(arguments, io);
         for (name, value) in saved {
             self.restore_var(&name, value);
         }
@@ -511,6 +540,10 @@ impl Shell {
             let previous = std::mem::replace(&mut self.positional, arguments[1..].to_vec());
             self.function_depth += 1;
             self.scopes.push(BTreeMap::new());
+            if let Some(binding) = &mut self.command_optind {
+                // A prefix on a function establishes a local option scan.
+                binding.option_scan = Some(self.option_scan.clone());
+            }
             let err = self.traps.actions.remove(&crate::traps::Event::Err);
             let result = self.command(&body, io, false);
             if let Some(action) = err {
@@ -830,7 +863,7 @@ impl Shell {
     }
     pub(crate) fn set_env(&mut self, name: &str, value: OsString) {
         if name == "OPTIND" {
-            self.opt_offset = 0;
+            self.option_scan.assign_index(&value);
         }
         self.unassigned_exports
             .retain(|key| !platform::env_name_eq(key, name));
@@ -840,7 +873,7 @@ impl Shell {
     }
     pub(crate) fn set_var(&mut self, name: &str, value: OsString) {
         if name == "OPTIND" {
-            self.opt_offset = 0;
+            self.option_scan.assign_index(&value);
         }
         if self.env(name).is_some() || self.export_on_assignment(name) {
             self.set_env(name, value);
@@ -851,7 +884,7 @@ impl Shell {
     }
     pub(crate) fn unset(&mut self, name: &str) {
         if name == "OPTIND" {
-            self.opt_offset = 0;
+            self.option_scan.index = 0;
         }
         self.unassigned_exports
             .retain(|key| !platform::env_name_eq(key, name));
@@ -872,17 +905,43 @@ impl Shell {
             self.unassigned_exports.push(name.into());
         }
     }
-    pub(crate) fn save_var(&self, name: &str) -> SavedVariable {
+    fn save_var(&self, name: &str) -> SavedVariable {
         SavedVariable {
-            opt_offset: self.opt_offset,
+            option_scan: None,
             value: self.variables.get(name).cloned(),
             exported: self.env(name).map(OsStr::to_owned),
             export_on_assignment: self.export_on_assignment(name),
         }
     }
-    pub(crate) fn restore_var(&mut self, name: &str, saved: SavedVariable) {
+    pub(crate) fn save_local(&self, name: &str) -> SavedVariable {
+        let mut saved = self.save_var(name);
+        if name == "OPTIND" {
+            saved.option_scan = Some(self.option_scan.clone());
+        }
+        saved
+    }
+    pub(crate) fn publish_optind(&mut self) {
+        let index = self.option_scan.index;
+        let value = OsString::from(index.to_string());
+        if let Some(saved) = &mut self.command_optind {
+            // getopts writes its result to the caller even with a command prefix.
+            if saved.exported.is_some() || saved.export_on_assignment {
+                saved.exported = Some(value.clone());
+                saved.value = None;
+            } else {
+                saved.value = Some(value.clone());
+            }
+        }
+        self.set_var("OPTIND", value);
+        // Publishing index 1 while partway through a group is not an explicit reset.
+        self.option_scan.index = index;
+    }
+    fn restore_var(&mut self, name: &str, saved: SavedVariable) {
         self.unset(name);
         if let Some(v) = saved.value {
+            if name == "OPTIND" {
+                self.option_scan.assign_index(&v);
+            }
             self.variables.insert(name.into(), v);
         }
         if let Some(v) = saved.exported {
@@ -890,8 +949,8 @@ impl Shell {
         } else if saved.export_on_assignment {
             self.unassigned_exports.push(name.into());
         }
-        if name == "OPTIND" {
-            self.opt_offset = saved.opt_offset;
+        if let Some(scan) = saved.option_scan {
+            self.option_scan = scan;
         }
     }
     pub(crate) fn parameter_is_set(&self, name: &str) -> bool {

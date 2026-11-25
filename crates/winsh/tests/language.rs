@@ -34,6 +34,26 @@ fn cases() -> Vec<(&'static str, &'static str, i32)> {
             0,
         ),
         (
+            "set -- -ab -cd; getopts abcd o; OPTIND=1 true; getopts abcd o; echo $o:$OPTIND; getopts abcd o; getopts abcd o; OPTIND=1 true; getopts abcd o; echo $o:$OPTIND",
+            "a:1\nd:3\n",
+            0,
+        ),
+        (
+            "set -- -ab; getopts ab o; OPTIND=1 true 2>&- <winsh_missing_input || :; getopts ab o; echo $o:$OPTIND",
+            "a:1\n",
+            0,
+        ),
+        (
+            "set -- -a -b; OPTIND=1 command getopts ab o; echo $o:$OPTIND; getopts ab o; echo $o:$OPTIND",
+            "a:2\nb:3\n",
+            0,
+        ),
+        (
+            "set -- -abc -def; getopts abcdef o; OPTIND=2 getopts abcdef o; echo $o:$OPTIND; getopts abcdef o; echo $o:$OPTIND",
+            "b:2\nc:3\n",
+            0,
+        ),
+        (
             "set -- -ab -cd; export OPTIND=2 OPTERR=0; getopts abcd o; { getopts abcd o; echo $o:$OPTIND:$OPTERR; } & wait",
             "d:3:0\n",
             0,
@@ -47,6 +67,31 @@ fn cases() -> Vec<(&'static str, &'static str, i32)> {
             "trap 'echo prior:$?; exit 14' EXIT; exit 7",
             "prior:7\n",
             14,
+        ),
+        (
+            "v=outer; set -- outerarg; trap 'echo \"$?:$v:$1\"; exit 14' EXIT; inner() { local v=inner; exit 3; }; outer() { inner innerarg; }; outer middle; echo unexpected",
+            "3:inner:innerarg\n",
+            14,
+        ),
+        (
+            "f() { trap 'echo \"cleanup:$1\"; return 7' EXIT; false; exit; }; f arg; echo unexpected",
+            "cleanup:arg\n",
+            7,
+        ),
+        (
+            "v=outer; trap 'echo \"$v:$?\"' EXIT; set -e; f() { local v=inner; false; }; f",
+            "outer:1\n",
+            1,
+        ),
+        (
+            "printf '%d/%i/%u/%o/%x/%X\\n' 010 0x10 +010 -0 -0x1 +0Xff; printf '%d\\n' -010 -0x10 -9223372036854775808; printf '%x\\n' 0xffffffffffffffff",
+            "8/16/8/0/ffffffffffffffff/FF\n-8\n-16\n-9223372036854775808\nffffffffffffffff\n",
+            0,
+        ),
+        (
+            "for n in -0x10 +0X10 -010 +010 -0x8000000000000000; do echo \"$((n+1))\"; done",
+            "-15\n17\n-7\n9\n-9223372036854775807\n",
+            0,
         ),
         (
             "trap 'echo cleanup:$?' EXIT; { exec winsh_missing_exec_target; } 2>&-; echo bad",

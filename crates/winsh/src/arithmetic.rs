@@ -164,13 +164,31 @@ impl Parser<'_> {
     }
 }
 fn integer(text: &str) -> Result<i64, String> {
-    let text = text.trim();
-    let value = if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16)
-    } else if text.starts_with('0') && text.len() > 1 {
-        i64::from_str_radix(&text[1..], 8)
+    integer_literal(text.trim())
+        .map(|value| value as i64)
+        .ok_or_else(|| format!("invalid arithmetic integer: {text}"))
+}
+
+/// A signed result wide enough to hold every unsigned 64-bit printf operand.
+pub(crate) fn integer_literal(text: &str) -> Option<i128> {
+    let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let (digits, radix) = if let Some(hex) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        (hex, 16)
+    } else if unsigned.starts_with('0') {
+        (unsigned, 8)
     } else {
-        text.parse()
+        (unsigned, 10)
     };
-    value.map_err(|_| format!("invalid arithmetic integer: {text}"))
+    if !digits.as_bytes().first()?.is_ascii_hexdigit() {
+        return None;
+    }
+    let magnitude = i128::from(u64::from_str_radix(digits, radix).ok()?);
+    Some(if text.starts_with('-') {
+        -magnitude
+    } else {
+        magnitude
+    })
 }

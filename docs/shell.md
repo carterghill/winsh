@@ -66,6 +66,21 @@ If an installer adds a directory to PATH, open a fresh terminal to pick it up.
 If winsh cannot find `winget.exe`, install or update Microsoft's App Installer
 and check `winget --version`. [Microsoft's WinGet guide](https://learn.microsoft.com/en-us/windows/package-manager/winget/)
 
+## IP address lookup
+
+On Windows, `ip --local` prints the IPv4 and IPv6 addresses of active adapters
+on one line, separated by spaces. It reads them directly from Windows and
+works offline. Like `hostname -I`, it skips loopback and IPv6 link-local
+addresses. VPN and virtual adapters can contribute additional addresses.
+
+Run `ip` to print each address on its own line. Bold labels identify local
+IPv4 and IPv6 addresses, followed by the public IPv4 or IPv6 address seen
+by ipify. Redirected output uses the same labels in plain text.
+Winsh uses `curl.exe` to make an HTTPS request to `api64.ipify.org` with a
+five-second timeout. The public address can belong to your router, VPN, or
+proxy. If either lookup fails, winsh prints the available result, reports the
+failure on stderr, and returns status 1. [ipify API](https://www.ipify.org/)
+
 ## Aliases and startup configuration
 
 Interactive Winsh sessions start with this alias for the bundled `ls` utility.

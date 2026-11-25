@@ -19,6 +19,7 @@ Usage: winsh [--help | --version]
 With no arguments, read commands from the terminal or standard input.
 Bundled utilities include cat, cp, grep, ls, mkdir, mv, rm, and touch.
 On Windows, use pkg install python3 or pkg install <WinGet-package-ID>.
+Use ip to show local and public IP addresses, or ip --local for local addresses only.
 
 Options:
   -c            Execute a command string and exit

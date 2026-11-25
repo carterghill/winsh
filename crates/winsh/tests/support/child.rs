@@ -8,6 +8,15 @@ use std::{
 fn main() {
     let mut args = env::args_os().skip(1);
     match args.next().unwrap().to_str().unwrap() {
+        "--disable" => {
+            let options: Vec<_> = args.collect();
+            assert_eq!(options, ["--silent", "--show-error", "--fail", "--max-time", "5",
+                "--max-filesize", "64", "https://api64.ipify.org"]);
+            match env::var("WINSH_TEST_IP_RESPONSE") {
+                Ok(body) => print!("{body}"),
+                Err(_) => process::exit(28),
+            }
+        }
         "install" => {
             // Stand in for WinGet and the Python install manager on an isolated PATH.
             let exe = env::current_exe().unwrap();

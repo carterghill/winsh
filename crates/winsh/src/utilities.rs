@@ -12,6 +12,8 @@ use crate::{Shell, ShellIo, platform};
 
 mod files;
 mod grep;
+#[cfg(windows)]
+mod ip;
 mod ls;
 #[cfg(windows)]
 mod pkg;
@@ -22,6 +24,8 @@ pub enum Utility {
     Cat,
     Cp,
     Grep,
+    #[cfg(windows)]
+    Ip,
     Ls,
     Mkdir,
     Mv,
@@ -36,6 +40,8 @@ impl Utility {
         ("cat", Self::Cat),
         ("cp", Self::Cp),
         ("grep", Self::Grep),
+        #[cfg(windows)]
+        ("ip", Self::Ip),
         ("ls", Self::Ls),
         ("mkdir", Self::Mkdir),
         ("mv", Self::Mv),
@@ -67,6 +73,8 @@ impl Utility {
         let (name, failure, result) = match self {
             Self::Cat => ("cat", 1, cat(shell, args, io)),
             Self::Grep => ("grep", 2, grep::run(shell, args, io)),
+            #[cfg(windows)]
+            Self::Ip => ("ip", 1, ip::run(shell, args, io)),
             Self::Ls => ("ls", 2, ls::run(shell, args, io)),
             #[cfg(windows)]
             Self::Pkg => ("pkg", 1, pkg::run(shell, args, io)),

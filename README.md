@@ -64,6 +64,10 @@ for example `pkg install Git.Git`. Start winsh normally. Windows prompts for
 administrator access when an installer needs it.
 [Installing Windows packages](docs/shell.md#installing-windows-packages)
 
+In winsh on Windows, run `ip` to see your local and public IP addresses.
+Use `ip --local` for a space-separated list of local addresses, like
+`hostname -I`. [IP address lookup](docs/shell.md#ip-address-lookup)
+
 From PowerShell, execute one command or inspect the available options:
 
 ~~~powershell

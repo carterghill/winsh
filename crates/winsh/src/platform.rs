@@ -5,6 +5,9 @@ use std::{
     process::{Child, Command, ExitStatus},
 };
 
+#[cfg(windows)]
+pub(crate) mod addresses;
+
 pub(crate) fn env_name_eq(key: &OsStr, name: &str) -> bool {
     if cfg!(windows) {
         key.to_str()
@@ -131,6 +134,13 @@ pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
 
 #[cfg(windows)]
 pub(crate) use windows::spawn;
+
+#[cfg(windows)]
+pub(crate) fn enable_virtual_terminal_output(file: &fs::File) -> bool {
+    use winapi_util::console::{mode, set_mode};
+    use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING as VT;
+    mode(file).is_ok_and(|flags| flags & VT != 0 || set_mode(file, flags | VT).is_ok())
+}
 
 #[cfg(windows)]
 #[allow(unsafe_code)]

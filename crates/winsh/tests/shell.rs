@@ -296,6 +296,59 @@ fn cli(args: &[&str], input: &[u8]) -> Output {
 
 #[cfg(windows)]
 #[test]
+fn ip_reports_local_addresses_independently_of_public_lookup() {
+    let mut f = Fixture::new();
+    f.run("export PATH=.");
+    assert_eq!(f.run("command -v ip; ip --help").status(), 0);
+    assert_eq!(f.run("ip --unknown").status(), 2);
+    assert!(!f.err().contains("curl.exe"));
+
+    let local_status = f.run("ip --local >local").status();
+    let local = fs::read_to_string(f.root.0.join("local")).unwrap();
+    if local.is_empty() {
+        assert_eq!(local_status, 1);
+        assert!(f.err().contains("no active local addresses"));
+    } else {
+        assert_eq!(local_status, 0);
+        assert_eq!(local.lines().count(), 1);
+        for word in local.split_whitespace() {
+            let address: std::net::IpAddr = word.parse().unwrap();
+            assert!(!address.is_loopback() && !address.is_unspecified());
+        }
+    }
+    assert!(!f.err().contains("curl.exe"));
+    fs::copy(helper(), f.root.0.join("curl.exe")).unwrap();
+    let labeled_local: String = local
+        .split_whitespace()
+        .map(|address| {
+            let family = if address.contains(':') {
+                "IPv6"
+            } else {
+                "IPv4"
+            };
+            format!("Local {family}: {address}\n")
+        })
+        .collect();
+    for (family, address) in [("IPv4", "203.0.113.7"), ("IPv6", "2001:db8::7")] {
+        assert_eq!(
+            f.run(&format!("WINSH_TEST_IP_RESPONSE={address} ip >both"))
+                .status(),
+            local_status
+        );
+        let both = fs::read_to_string(f.root.0.join("both")).unwrap();
+        assert_eq!(both, format!("{labeled_local}Public {family}: {address}\n"));
+    }
+    for command in ["ip >partial", "WINSH_TEST_IP_RESPONSE='<html>' ip >partial"] {
+        assert_eq!(f.run(command).status(), 1);
+        let partial = fs::read_to_string(f.root.0.join("partial")).unwrap();
+        assert_eq!(partial, labeled_local);
+    }
+    assert!(f.err().contains("curl.exe exited with status 28"));
+    assert!(f.err().contains("invalid IP address"));
+}
+
+#[cfg(windows)]
+#[test]
 fn pkg_installs_python_runtime_and_reuses_its_manager() {
     let mut f = Fixture::new();
     f.run("export PATH=.");

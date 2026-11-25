@@ -289,12 +289,10 @@ pub(super) fn run(shell: &Shell, args: &[OsString], io: &mut ShellIo) -> io::Res
     };
     #[cfg(windows)]
     let opts = {
-        use winapi_util::console::{mode, set_mode};
-        use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING as VT;
         let colors = opts.colors
-            && terminal.as_ref().is_none_or(|file| {
-                mode(file).is_ok_and(|flags| flags & VT != 0 || set_mode(file, flags | VT).is_ok())
-            });
+            && terminal
+                .as_ref()
+                .is_none_or(platform::enable_virtual_terminal_output);
         Options { colors, ..opts }
     };
     let width = terminal.as_ref().filter(|_| !opts.one_line).map(|file| {

@@ -390,12 +390,13 @@ impl State {
                 let (row, column) = screen.cursor_position();
                 if row < rows && column < columns {
                     let x = PADDING + i32::from(column) * self.fonts.width;
-                    let y = PADDING + i32::from(row + 1) * self.fonts.height;
+                    let y = PADDING + i32::from(row) * self.fonts.height;
+                    let cursor_width = (self.fonts.width / 6).max(1);
                     let rect = RECT {
                         left: x,
-                        top: y - 2,
-                        right: x + self.fonts.width,
-                        bottom: y,
+                        top: y + self.fonts.cursor_y.start,
+                        right: x + cursor_width,
+                        bottom: y + self.fonts.cursor_y.end,
                     };
                     let brush = CreateSolidBrush(DEFAULT_FOREGROUND);
                     FillRect(memory, &rect, brush);
@@ -544,6 +545,7 @@ struct Fonts {
     handles: Vec<HFONT>,
     width: i32,
     height: i32,
+    cursor_y: std::ops::Range<i32>,
 }
 
 impl Fonts {
@@ -552,6 +554,7 @@ impl Fonts {
             handles: Vec::new(),
             width: 1,
             height: 1,
+            cursor_y: 0..1,
         };
         // SAFETY: valid font parameters and static face name. Each created font
         // is owned by Fonts and deleted only after being deselected from a DC.
@@ -596,6 +599,9 @@ impl Fonts {
             }
             fonts.width = metrics.tmAveCharWidth.max(1);
             fonts.height = (metrics.tmHeight + metrics.tmExternalLeading).max(1);
+            // Use the font's em height, extending through the descenders.
+            let bottom = metrics.tmHeight.clamp(1, fonts.height);
+            fonts.cursor_y = metrics.tmInternalLeading.clamp(0, bottom - 1)..bottom;
         }
         Ok(fonts)
     }

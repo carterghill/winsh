@@ -41,8 +41,10 @@ use crate::{
 };
 
 mod fonts;
+mod settings;
 mod titlebar;
 use fonts::{Fonts, Symbols};
+use settings::{FontSettings, SettingsFile};
 use titlebar::{Control, Layout, px};
 
 const PADDING: i32 = 12;
@@ -57,7 +59,11 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
     // SAFETY: GetDpiForSystem has no preconditions.
     let dpi = unsafe { GetDpiForSystem() }.max(96);
-    let mut state = Box::new(State::new(program, arguments, dpi)?);
+    let settings_path = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .map(|p| p.join("winsh/settings.json"));
+    let mut state = Box::new(State::new(program, arguments, dpi, settings_path)?);
     // SAFETY: static system cursor, borrowed for the window class lifetime.
     let cursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_IBEAM) };
     let class = WNDCLASSW {
@@ -215,20 +221,32 @@ struct State {
     pressed: Option<Control>,
     title_dirty: bool,
     fonts: Fonts,
+    font_settings: FontSettings,
+    settings_file: Option<SettingsFile>,
     symbols: Symbols,
     focused: bool,
     cursor_visible: bool,
     cursor_tick: Instant,
     size: (u16, u16),
+    client_size: (i32, i32),
     error: Option<String>,
     status: i32,
 }
 
 impl State {
-    fn new(program: &Path, arguments: &[OsString], dpi: u32) -> io::Result<Self> {
+    fn new(
+        program: &Path,
+        arguments: &[OsString],
+        dpi: u32,
+        settings_path: Option<PathBuf>,
+    ) -> io::Result<Self> {
         let symbols = Symbols::load()?;
+        let settings_file = settings_path.map(SettingsFile::open);
+        let initial = settings_file.as_ref().map(|file| file.current.clone());
+        let font_settings = FontSettings::default();
+        let fonts = Fonts::new(dpi, &font_settings)?;
         let size = (30, 100);
-        Ok(Self {
+        let mut state = Self {
             tabs: vec![Tab::spawn(program, arguments, size, 1)?],
             active: 0,
             next_number: 2,
@@ -239,15 +257,22 @@ impl State {
             hover: None,
             pressed: None,
             title_dirty: true,
-            fonts: Fonts::new(dpi)?,
+            fonts,
+            font_settings,
+            settings_file,
             symbols,
             focused: false,
             cursor_visible: true,
             cursor_tick: Instant::now(),
             size,
+            client_size: (0, 0),
             error: None,
             status: 0,
-        })
+        };
+        if let Some(initial) = initial {
+            state.apply_font(initial);
+        }
+        Ok(state)
     }
 
     fn current(&self) -> &Tab {
@@ -304,6 +329,7 @@ impl State {
     }
 
     fn resize(&mut self, width: i32, height: i32) {
+        self.client_size = (width, height);
         if width <= 0 || height <= 0 {
             return;
         } // A minimized window has no grid.
@@ -389,7 +415,8 @@ impl State {
     }
 
     fn tick(&mut self) -> bool {
-        let mut redraw = false;
+        let update = self.settings_file.as_mut().and_then(SettingsFile::poll);
+        let mut redraw = update.is_some_and(|settings| self.apply_font(settings));
         for index in (0..self.tabs.len()).rev() {
             let tab = &mut self.tabs[index];
             let mut exit = None;
@@ -439,6 +466,29 @@ impl State {
             redraw = true;
         }
         redraw
+    }
+
+    fn apply_font(&mut self, update: Result<FontSettings, String>) -> bool {
+        let settings = match update {
+            Ok(settings) if settings == self.font_settings => return false,
+            Ok(settings) => settings,
+            Err(error) => {
+                self.error = Some(error);
+                return false;
+            }
+        };
+        match Fonts::new(self.dpi, &settings) {
+            Ok(fonts) => {
+                self.fonts = fonts;
+                self.font_settings = settings;
+                self.resize(self.client_size.0, self.client_size.1);
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Could not apply the terminal font.\n\n{error}"));
+                false
+            }
+        }
     }
 
     fn paint(&self, hwnd: HWND) {
@@ -779,7 +829,7 @@ unsafe extern "system" fn window_proc(
             }
             WM_DPICHANGED if !state.is_null() => {
                 let dpi = (wparam as u32 & 0xffff).max(96);
-                if let Ok(fonts) = Fonts::new(dpi) {
+                if let Ok(fonts) = Fonts::new(dpi, &(*state).font_settings) {
                     (*state).fonts = fonts;
                 }
                 (*state).dpi = dpi;
@@ -1119,9 +1169,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saving_font_settings_resizes_live_tabs_and_recovers_from_invalid_edits() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("winsh/settings.json");
+        let program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        let mut state = State::new(
+            &program,
+            &["/d".into(), "/q".into()],
+            96,
+            Some(path.clone()),
+        )
+        .unwrap();
+        assert!(path.is_file());
+        assert_eq!(
+            state.settings_file.as_ref().unwrap().current,
+            Ok(FontSettings::default())
+        );
+        state.resize(800, 600);
+        state.activate(Control::New).unwrap();
+        let original_grid = state.size;
+        let original_height = state.fonts.height;
+        let original_tab = state.current().terminal.clone();
+
+        let wait_for = |state: &mut State, ready: &dyn Fn(&State) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready(state) {
+                assert!(Instant::now() < deadline, "timed out waiting for font edit");
+                state.tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let mut replacement = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+        replacement
+            .write_all(br#"{"terminal":{"font_size_px":16}}"#)
+            .unwrap();
+        replacement.persist(&path).unwrap();
+        wait_for(&mut state, &|s| {
+            s.font_settings.font_size_px == 16.0
+                && s.tabs
+                    .iter()
+                    .all(|tab| tab.terminal.lock().unwrap().screen().size() == s.size)
+        });
+        assert!(state.fonts.height > original_height && state.size.0 < original_grid.0);
+        assert_eq!(state.font_settings.font_family, "Cascadia Mono");
+        assert!(Arc::ptr_eq(&original_tab, &state.current().terminal));
+
+        std::fs::write(&path, r#"{"terminal":{"font_size_px":0}}"#).unwrap();
+        wait_for(&mut state, &|s| s.error.is_some());
+        assert!(state.error.take().unwrap().contains("font_size_px"));
+        assert_eq!(state.font_settings.font_size_px, 16.0);
+        std::fs::write(&path, "{").unwrap();
+        wait_for(&mut state, &|s| s.error.is_some());
+        assert!(state.error.take().unwrap().contains("settings.json"));
+        assert_eq!(state.font_settings.font_size_px, 16.0);
+        std::fs::write(&path, r#"{"terminal":{"font_family":"Consolas"}}"#).unwrap();
+        wait_for(&mut state, &|s| s.font_settings.font_family == "Consolas");
+        assert_eq!(state.font_settings.font_size_px, 14.0);
+        let reopened = SettingsFile::open(path.clone());
+        assert_eq!(reopened.current.as_ref().unwrap(), &state.font_settings);
+        std::fs::remove_file(path).unwrap();
+        wait_for(&mut state, &|s| s.font_settings == FontSettings::default());
+        assert_eq!(state.size, original_grid);
+    }
+
+    #[test]
     fn background_tab_can_update_and_exit_while_the_selected_shell_keeps_its_state() {
         let program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
-        let mut state = State::new(&program, &["/d".into(), "/q".into()], 96).unwrap();
+        let mut state = State::new(&program, &["/d".into(), "/q".into()], 96, None).unwrap();
         state.send(b"set WINSH_TAB_TEST=first\recho ready\r".to_vec());
         state.activate(Control::New).unwrap();
         state.send(b"if not defined WINSH_TAB_TEST title independent tab\r".to_vec());

@@ -4,13 +4,16 @@
 
 # Draw connected OS, directory, and Git segments at each prompt.
 winsh_powerline() {
-    local prompt_os prompt_parent prompt_folder prompt_branch
+    local prompt_os prompt_parent prompt_folder prompt_branch prompt_git_changes prompt_git_tracking
     winsh_prompt_info
-    local light='#e0e5ea' teal='#3b8586' green='#7ba876' ink='#282c38'
+    local light='#e0e5ea' teal='#3b8586' git_bg='#7ba876' ink='#282c38'
 
     printf '%s' "%K{$light}%F{$teal} $prompt_os %K{$teal}%F{$light}   $prompt_parent%B$prompt_folder%b "
     if [ -n "$prompt_branch" ]; then
-        printf '%s' "%K{$green}%F{$teal}%F{$ink}   $prompt_branch %k%F{$green}"
+        if [ -n "$prompt_git_changes" ]; then
+            git_bg='#d8af70'
+        fi
+        printf '%s' "%K{$git_bg}%F{$teal}%F{$ink}   $prompt_branch$prompt_git_changes$prompt_git_tracking %k%F{$git_bg}"
     else
         printf '%s' "%k%F{$teal}"
     fi

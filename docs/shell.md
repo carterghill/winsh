@@ -120,9 +120,16 @@ clears the session's alias table.
 ## Custom prompts
 
 The default Powerline-style prompt connects a light OS badge, a teal directory,
-and a green Git segment with chevrons. The path starts with `~` under your
+and a Git segment with chevrons. The path starts with `~` under your
 home directory and highlights the current folder in bold. Inside a repository
 the Git segment shows the current branch or the short commit ID for a detached HEAD.
+With Git on your PATH, each new prompt checks the working tree. The segment is
+green when clean and turns amber for local changes. For example, `main +1 !2 ?1`
+means one staged change, two unstaged changes, and one untracked entry. An
+untracked directory counts as one entry. Conflicted paths appear separately as
+`~N`. If the branch tracks an upstream, `↑N` and `↓N` show commits ahead and
+behind the locally known upstream.
+
 The [starter winshrc](../crates/winsh/winshrc) defines the colors and icons in
 `winsh_powerline` and includes the original full-path `$` prompt as a commented option.
 To switch, comment out the active line and uncomment the other. An existing
@@ -131,6 +138,9 @@ profile without a prompt definition continues to use the full-path prompt.
 The `winsh_prompt_info` builtin fills the function’s local `prompt_os`,
 `prompt_parent`, `prompt_folder`, and `prompt_branch` variables. Their values
 are escaped for use in a zsh prompt. `prompt_branch` is empty outside a repository.
+The builtin also sets `prompt_git_changes` and `prompt_git_tracking`. Each is
+empty when there are no indicators and otherwise starts with a space so it can
+be appended directly to the branch name.
 
 Set `PROMPT` or `PS1` to change the primary prompt.
 `PROMPT2` and `PS2` control the continuation prompt.

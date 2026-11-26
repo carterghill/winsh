@@ -1,3 +1,4 @@
+use super::settings::FontSettings;
 use std::{cell::RefCell, collections::HashMap, io, ptr};
 use windows_sys::{
     Win32::{Foundation::HANDLE, Graphics::Gdi::*},
@@ -62,11 +63,12 @@ pub(super) struct Fonts {
 }
 
 impl Fonts {
-    pub(super) fn new(dpi: u32) -> io::Result<Self> {
-        let em = ((12 * dpi + 36) / 72) as i32;
+    pub(super) fn new(dpi: u32, settings: &FontSettings) -> io::Result<Self> {
+        let em = (settings.font_size_px * dpi as f32 / 96.0).round().max(1.0) as i32;
+        let family = super::wide(&settings.font_family);
         let mut text = Vec::with_capacity(8);
         for style in 0..8 {
-            text.push(create_font(em, style, w!("Cascadia Mono"))?);
+            text.push(create_font(em, style, family.as_ptr())?);
         }
         let metrics = font_metrics(text[0].0)?;
         let width = metrics.tmAveCharWidth.max(1);
@@ -236,7 +238,7 @@ impl Drop for Font {
 }
 
 fn create_font(em: i32, style: usize, face: *const u16) -> io::Result<Font> {
-    // SAFETY: the caller supplies a static, NUL-terminated face name.
+    // SAFETY: the caller supplies a NUL-terminated face name valid for this call.
     let font = unsafe {
         CreateFontW(
             -em,
@@ -298,7 +300,7 @@ mod font_tests {
         let symbols = Symbols::load().unwrap();
         assert_eq!(symbols.glyph("D"), None);
         for dpi in [96, 120, 144, 192] {
-            let fonts = Fonts::new(dpi).unwrap();
+            let fonts = Fonts::new(dpi, &FontSettings::default()).unwrap();
             for spaced in [false, true] {
                 check_glyphs(&symbols, &fonts, spaced);
             }

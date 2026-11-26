@@ -1345,6 +1345,69 @@ fn powerline_prompt_tracks_worktree_branch_and_quotes_names_as_text() {
 }
 
 #[test]
+fn powerline_prompt_refreshes_after_git_changes() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return;
+    }
+    let mut f = Fixture::new();
+    let profile_root = quote(&f.root.0);
+    let config = quote(f.root.0.join("gitconfig"));
+    let setup = format!(
+        "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; \
+         export APPDATA={profile_root} XDG_CONFIG_HOME={profile_root} \
+                GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL={config}; \
+         mkdir repo && cd repo && git init -q --template= -b main && \
+         git config user.name Tester && git config user.email test@example.invalid"
+    );
+    assert_eq!(f.run(&setup).status(), 0, "{}", f.err());
+    f.shell.load_interactive_profile(&mut f.io).unwrap();
+    let assert_prompt = |f: &mut Fixture, branch: &str, dirty: bool| {
+        let prompt = f.shell.render_prompt(false, &mut f.io).unwrap();
+        assert!(
+            prompt.visible.ends_with(&format!(" {branch}  ")),
+            "{}",
+            prompt.visible
+        );
+        let color = if dirty { "216;175;112" } else { "123;168;118" };
+        assert!(prompt.display.contains(&format!("\x1b[48;2;{color}m")));
+    };
+    assert_prompt(&mut f, "main", false);
+    assert_eq!(
+        f.run(
+            "echo ignored >.gitignore && echo v1 >tracked && git add . && git commit -qm first && \
+               git branch upstream && git branch --set-upstream-to=upstream && mkdir sub && cd sub"
+        )
+        .status(),
+        0,
+        "{}",
+        f.err()
+    );
+    assert_prompt(&mut f, "main", false);
+    assert_eq!(
+        f.run("echo v2 >../tracked && echo note >new && echo hidden >../ignored")
+            .status(),
+        0
+    );
+    assert_prompt(&mut f, "main !1 ?1", true);
+    assert_eq!(
+        f.run("git add ../tracked && echo v3 >../tracked").status(),
+        0
+    );
+    assert_prompt(&mut f, "main +1 !1 ?1", true);
+    assert_eq!(
+        f.run("git add -A && git commit -qm second").status(),
+        0,
+        "{}",
+        f.err()
+    );
+    assert_prompt(&mut f, "main ↑1", false);
+}
+
+#[test]
 fn prompt_expands_session_state_and_preserves_the_previous_command_status() {
     let mut f = Fixture::new();
     let config = if cfg!(windows) {

@@ -89,8 +89,8 @@ boundaries; Windows text input preserves UTF-16 surrogate pairs. Wide and
 combining characters retain their terminal cell positions. Window title and
 basic device/status/cursor queries are supported.
 
-GDI renders a fixed 12-point Cascadia Mono font with a Windows fallback and
-per-monitor DPI updates. For private-use icon characters, the terminal loads
+GDI renders Cascadia Mono by default with a Windows fallback and per-monitor
+DPI scaling. For private-use icon characters, the terminal loads
 Symbols Nerd Font Mono 3.4.0 from its executable. Icons retain their natural
 proportions. The terminal aligns the visible strokes of each icon with the
 surrounding text. `ls --icons` prints two spaces after each icon so the icon
@@ -104,6 +104,28 @@ protocol replies share an input worker; the output worker parses directly into
 the screen model. ConPTY control and shutdown run independently of the window.
 Closing a session terminates its shell and descendants through a job object,
 and drains output while releasing ConPTY to avoid pipe deadlocks.
+
+## Font settings
+
+On first launch the dedicated terminal creates `%APPDATA%\winsh\settings.json`
+beside `winshrc`. Save an edit to update the text and icon sizes in all open
+tabs. Each shell session keeps running.
+
+~~~json
+{
+  "terminal": {
+    "font_family": "Cascadia Mono",
+    "font_size_px": 14
+  }
+}
+~~~
+
+Choose an installed monospaced font for `font_family`. The size is in logical
+pixels at 100% Windows scaling and accepts values from 1 to 256, including
+fractions. The default of 14 logical pixels is 10.5 points. A size of 16
+reproduces the previous 12-point text. Omitted fields
+use their defaults. If an edit is invalid, the terminal reports the error and
+continues using the last valid settings.
 
 ## Current limits
 

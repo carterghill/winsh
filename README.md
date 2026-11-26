@@ -133,6 +133,10 @@ Use Ctrl+Shift+V to paste, Ctrl+Shift+C to copy the visible screen, and the mous
 wheel or Shift+PageUp/PageDown to scroll. `exit` closes the window. See
 [the terminal guide](docs/terminal.md) for controls, other shells, and limits.
 
+Set the dedicated terminal’s font in `%APPDATA%\winsh\settings.json`. It
+defaults to Cascadia Mono at 14 logical pixels and applies edits to open tabs.
+[Font settings](docs/terminal.md#font-settings)
+
 See [the shell guide](docs/shell.md) for current limits and a walkthrough of the
 Rust code, and [the syntax guide](docs/syntax.md) for the parser API.
 Inspect parsed syntax without executing it using the development example:

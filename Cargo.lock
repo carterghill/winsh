@@ -821,6 +821,8 @@ dependencies = [
 name = "winsh-terminal"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "tempfile",
  "ttf-parser",
  "vt100",

@@ -1,10 +1,12 @@
 //! Interactive zsh-style prompt expansion, independent of the terminal frontend.
+mod git;
+
 use crate::{Shell, ShellIo, expand, syntax};
 use chrono::{DateTime, Local, format::StrftimeItems};
 use std::{
     fmt::Write as _,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     str::Chars,
     sync::LazyLock,
@@ -27,12 +29,14 @@ pub(crate) fn set_prompt_info(shell: &mut Shell) {
         Some(i) if i + 1 < path.len() => path.split_at(i + 1),
         _ => ("", path.as_ref()),
     };
-    let branch = git_head(shell).unwrap_or_default();
+    let repo = git::info(shell);
     shell.set_var("prompt_os", icon.into());
+    shell.set_var("prompt_git_changes", repo.changes.into());
+    shell.set_var("prompt_git_tracking", repo.tracking.into());
     for (name, text) in [
         ("prompt_parent", parent),
         ("prompt_folder", folder),
-        ("prompt_branch", &branch),
+        ("prompt_branch", repo.branch.as_str()),
     ] {
         // Substitution precedes zsh percent expansion. Display file and ref
         // names literally even when they contain percent escapes or controls.
@@ -48,55 +52,6 @@ pub(crate) fn set_prompt_info(shell: &mut Shell) {
         }
         shell.set_var(name, literal.into());
     }
-}
-
-// Only HEAD is needed. This also works for an unborn branch and does not
-// start Git or scan the working tree on every input line.
-fn git_head(shell: &Shell) -> Option<String> {
-    let dir = if let Some(dir) = shell.var("GIT_DIR").filter(|v| !v.is_empty()) {
-        shell.cwd().join(dir)
-    } else {
-        shell.cwd().ancestors().find_map(|parent| {
-            let dotgit = parent.join(".git");
-            if dotgit.exists() {
-                Some(dotgit)
-            } else if parent.join("HEAD").is_file() && parent.join("objects").is_dir() {
-                Some(parent.to_owned()) // Bare repository.
-            } else {
-                None
-            }
-        })?
-    };
-    let dir = if dir.is_file() {
-        // A linked worktree or submodule can use a relative gitdir pointer.
-        let pointer = read_git_line(&dir)?;
-        dir.parent()?.join(pointer.strip_prefix("gitdir: ")?)
-    } else {
-        dir
-    };
-    let head = read_git_line(&dir.join("HEAD"))?;
-    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
-        return Some(branch.to_owned());
-    }
-    (matches!(head.len(), 40 | 64) && head.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| head[..8].to_owned())
-}
-
-fn read_git_line(path: &Path) -> Option<String> {
-    if !path.is_file() {
-        return None;
-    }
-    let mut line = String::new();
-    fs::File::open(path)
-        .ok()?
-        .take(8193)
-        .read_to_string(&mut line)
-        .ok()?;
-    if line.len() > 8192 {
-        return None;
-    }
-    line.truncate(line.trim_end_matches(['\r', '\n']).len());
-    Some(line)
 }
 
 pub(crate) fn ensure_profile(path: &Path) -> io::Result<()> {

@@ -305,6 +305,11 @@ fn winsh_new_profile_and_custom_prompt_in_a_live_terminal() {
     // Edit in the middle of a line following a colored prompt.
     h.session.write(b"echo ac\x1b[Db\r".to_vec()).unwrap();
     h.wait_for("\nabc\nfolder-src [0]>");
+    // The terminal's word actions send Alt+Left and Alt+Right to the editor.
+    h.session
+        .write(b"echo alpha bravo charlie\x1b[1;3D\x1b[1;3DX\x1b[1;3CY\r".to_vec())
+        .unwrap();
+    h.wait_for("\nalpha XbravoY charlie\nfolder-src [0]>");
     h.enter("exit 0");
     h.wait_for_exit(0);
 }

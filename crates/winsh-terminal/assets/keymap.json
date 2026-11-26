@@ -1,0 +1,16 @@
+{
+  "ctrl+left": "previous_tab",
+  "ctrl+right": "next_tab",
+  "alt+left": "word_left",
+  "alt+right": "word_right",
+  "ctrl+shift+tab": "previous_tab",
+  "ctrl+tab": "next_tab",
+  "ctrl+t": "new_tab",
+  "ctrl+shift+t": "new_tab",
+  "ctrl+shift+w": "close_tab",
+  "ctrl+shift+c": "copy",
+  "ctrl+shift+v": "paste",
+  "shift+insert": "paste",
+  "shift+pageup": "scroll_page_up",
+  "shift+pagedown": "scroll_page_down"
+}

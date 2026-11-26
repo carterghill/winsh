@@ -41,10 +41,12 @@ use crate::{
 };
 
 mod fonts;
+mod keymap;
 mod settings;
 mod titlebar;
 use fonts::{Fonts, Symbols};
-use settings::{FontSettings, SettingsFile};
+use keymap::{Action, Keymap};
+use settings::{ConfigFile, FontSettings};
 use titlebar::{Control, Layout, px};
 
 const PADDING: i32 = 12;
@@ -59,11 +61,11 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
     // SAFETY: GetDpiForSystem has no preconditions.
     let dpi = unsafe { GetDpiForSystem() }.max(96);
-    let settings_path = std::env::var_os("APPDATA")
+    let config_dir = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .map(|p| p.join("winsh/settings.json"));
-    let mut state = Box::new(State::new(program, arguments, dpi, settings_path)?);
+        .map(|p| p.join("winsh"));
+    let mut state = Box::new(State::new(program, arguments, dpi, config_dir)?);
     // SAFETY: static system cursor, borrowed for the window class lifetime.
     let cursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_IBEAM) };
     let class = WNDCLASSW {
@@ -133,11 +135,18 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
         }
         // SAFETY: a message obtained from GetMessageW.
         unsafe {
-            // A tab shortcut belongs entirely to the window. Translating it
-            // would queue a control character for the newly selected shell.
-            if !(message.message == WM_KEYDOWN
-                && tab_shortcut(message.wParam as u16, modifiers()).is_some())
+            let key_down =
+                message.hwnd == hwnd && matches!(message.message, WM_KEYDOWN | WM_SYSKEYDOWN);
+            let code = message.wParam as u16;
+            // Consume shortcuts before TranslateMessage can queue a second
+            // character, possibly for a tab the shortcut just activated.
+            if key_down && state.shortcut(code, modifiers(), message.lParam & (1 << 30) != 0, hwnd)
             {
+                refresh(hwnd, &mut *state, true);
+                continue;
+            }
+            // Unbound Tab is encoded by key_down, including Shift+Tab.
+            if !(key_down && code == VK_TAB) {
                 TranslateMessage(&message);
             }
             DispatchMessageW(&message);
@@ -222,7 +231,9 @@ struct State {
     title_dirty: bool,
     fonts: Fonts,
     font_settings: FontSettings,
-    settings_file: Option<SettingsFile>,
+    settings_file: Option<ConfigFile<FontSettings>>,
+    keymap: Keymap,
+    keymap_file: Option<ConfigFile<Keymap>>,
     symbols: Symbols,
     focused: bool,
     cursor_visible: bool,
@@ -238,10 +249,19 @@ impl State {
         program: &Path,
         arguments: &[OsString],
         dpi: u32,
-        settings_path: Option<PathBuf>,
+        config_dir: Option<PathBuf>,
     ) -> io::Result<Self> {
         let symbols = Symbols::load()?;
-        let settings_file = settings_path.map(SettingsFile::open);
+        let settings_file = config_dir
+            .as_ref()
+            .map(|dir| ConfigFile::open(dir.join("settings.json")));
+        let keymap_file: Option<ConfigFile<Keymap>> =
+            config_dir.map(|dir| ConfigFile::open(dir.join("keymap.json")));
+        let (keymap, error) = match keymap_file.as_ref().map(|file| &file.current) {
+            Some(Ok(map)) => (map.clone(), None),
+            Some(Err(error)) => (Keymap::default(), Some(error.clone())),
+            None => (Keymap::default(), None),
+        };
         let initial = settings_file.as_ref().map(|file| file.current.clone());
         let font_settings = FontSettings::default();
         let fonts = Fonts::new(dpi, &font_settings)?;
@@ -260,13 +280,15 @@ impl State {
             fonts,
             font_settings,
             settings_file,
+            keymap,
+            keymap_file,
             symbols,
             focused: false,
             cursor_visible: true,
             cursor_tick: Instant::now(),
             size,
             client_size: (0, 0),
-            error: None,
+            error,
             status: 0,
         };
         if let Some(initial) = initial {
@@ -358,36 +380,70 @@ impl State {
         let _ = tab.session.write(bytes);
     }
 
-    fn key_down(&mut self, code: u16, modifiers: Modifiers, hwnd: HWND) -> bool {
-        if (modifiers.control && modifiers.shift && code == b'V' as u16)
-            || (modifiers.shift && code == VK_INSERT)
-        {
-            if let Some(text) = clipboard_text(hwnd) {
-                let bracketed = self
-                    .current()
+    fn shortcut(&mut self, code: u16, modifiers: Modifiers, repeat: bool, hwnd: HWND) -> bool {
+        let Some(action) = self.keymap.action(code, modifiers) else {
+            return false;
+        };
+        match action {
+            Action::NewTab | Action::CloseTab | Action::PreviousTab | Action::NextTab if repeat => {
+            }
+            Action::NewTab => {
+                if let Err(error) = self.activate(Control::New) {
+                    self.error = Some(format!("Could not open a tab.\n\n{error}"));
+                }
+            }
+            Action::CloseTab => self.close(self.active),
+            Action::PreviousTab => {
+                self.select((self.active + self.tabs.len() - 1) % self.tabs.len())
+            }
+            Action::NextTab => self.select((self.active + 1) % self.tabs.len()),
+            Action::WordLeft | Action::WordRight => {
+                let key = if action == Action::WordLeft {
+                    Key::Left
+                } else {
+                    Key::Right
+                };
+                self.send_key(
+                    key,
+                    Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                );
+            }
+            Action::Paste => {
+                if let Some(text) = clipboard_text(hwnd) {
+                    let bracketed = self
+                        .current()
+                        .terminal
+                        .lock()
+                        .unwrap()
+                        .screen()
+                        .bracketed_paste();
+                    self.send(input::paste(&text, bracketed));
+                }
+            }
+            Action::Copy => {
+                let text = self.current().terminal.lock().unwrap().screen().contents();
+                copy_text(hwnd, &text);
+            }
+            Action::ScrollPageUp | Action::ScrollPageDown => {
+                let lines = i32::from(self.size.0).saturating_sub(1);
+                self.current()
                     .terminal
                     .lock()
                     .unwrap()
-                    .screen()
-                    .bracketed_paste();
-                self.send(input::paste(&text, bracketed));
+                    .scroll(if action == Action::ScrollPageUp {
+                        lines
+                    } else {
+                        -lines
+                    });
             }
-            return true;
         }
-        if modifiers.control && modifiers.shift && code == b'C' as u16 {
-            let text = self.current().terminal.lock().unwrap().screen().contents();
-            copy_text(hwnd, &text);
-            return true;
-        }
-        if modifiers.shift && matches!(code, VK_PRIOR | VK_NEXT) {
-            let lines = i32::from(self.size.0).saturating_sub(1);
-            self.current()
-                .terminal
-                .lock()
-                .unwrap()
-                .scroll(if code == VK_PRIOR { lines } else { -lines });
-            return true;
-        }
+        true
+    }
+
+    fn key_down(&mut self, code: u16, modifiers: Modifiers) -> bool {
         let key = match code {
             VK_UP => Key::Up,
             VK_DOWN => Key::Down,
@@ -403,6 +459,11 @@ impl State {
             VK_F1..=VK_F12 => Key::Function((code - VK_F1 + 1) as u8),
             _ => return false,
         };
+        self.send_key(key, modifiers);
+        true
+    }
+
+    fn send_key(&mut self, key: Key, modifiers: Modifiers) {
         let application = self
             .current()
             .terminal
@@ -411,11 +472,16 @@ impl State {
             .screen()
             .application_cursor();
         self.send(input::key(key, modifiers, application));
-        true
     }
 
     fn tick(&mut self) -> bool {
-        let update = self.settings_file.as_mut().and_then(SettingsFile::poll);
+        if let Some(update) = self.keymap_file.as_mut().and_then(ConfigFile::poll) {
+            match update {
+                Ok(map) => self.keymap = map,
+                Err(error) => self.error = Some(error),
+            }
+        }
+        let update = self.settings_file.as_mut().and_then(ConfigFile::poll);
         let mut redraw = update.is_some_and(|settings| self.apply_font(settings));
         for index in (0..self.tabs.len()).rev() {
             let tab = &mut self.tabs[index];
@@ -668,26 +734,6 @@ impl State {
     }
 }
 
-enum Shortcut {
-    New,
-    Close,
-    Cycle { backward: bool },
-}
-
-fn tab_shortcut(code: u16, modifiers: Modifiers) -> Option<Shortcut> {
-    if !modifiers.control || modifiers.alt {
-        return None;
-    }
-    match code {
-        VK_TAB => Some(Shortcut::Cycle {
-            backward: modifiers.shift,
-        }),
-        0x54 if modifiers.shift => Some(Shortcut::New),
-        0x57 if modifiers.shift => Some(Shortcut::Close),
-        _ => None,
-    }
-}
-
 fn point(lparam: LPARAM) -> POINT {
     POINT {
         x: lparam as i16 as i32,
@@ -863,25 +909,7 @@ unsafe extern "system" fn window_proc(
                 DefWindowProcW(hwnd, message, wparam, lparam)
             }
             WM_KEYDOWN | WM_SYSKEYDOWN if !state.is_null() => {
-                let mods = modifiers();
-                if let Some(shortcut) = tab_shortcut(wparam as u16, mods) {
-                    if lparam & (1 << 30) == 0 {
-                        let index = (*state).active;
-                        let count = (*state).tabs.len();
-                        let control = match shortcut {
-                            Shortcut::New => Control::New,
-                            Shortcut::Close => Control::CloseTab(index),
-                            Shortcut::Cycle { backward } => Control::Tab(if backward {
-                                (index + count - 1) % count
-                            } else {
-                                (index + 1) % count
-                            }),
-                        };
-                        activate(hwnd, state, control);
-                    }
-                    return 0;
-                }
-                let handled = (*state).key_down(wparam as u16, mods, hwnd);
+                let handled = (*state).key_down(wparam as u16, modifiers());
                 if handled {
                     0
                 } else {
@@ -889,13 +917,7 @@ unsafe extern "system" fn window_proc(
                 }
             }
             WM_CHAR | WM_SYSCHAR if !state.is_null() => {
-                let modifiers = modifiers();
                 let unit = wparam as u16;
-                // Tab is handled in WM_KEYDOWN, and clipboard shortcuts must
-                // not also inject the translated control character.
-                if unit == 9 || (modifiers.control && modifiers.shift && matches!(unit, 3 | 22)) {
-                    return 0;
-                }
                 if message == WM_SYSCHAR && unit == 32 {
                     return DefWindowProcW(hwnd, message, wparam, lparam);
                 }
@@ -1169,6 +1191,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keymap_drives_tab_switching_and_reloads_in_open_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        let mut state = State::new(
+            &program,
+            &["/d".into(), "/q".into()],
+            96,
+            Some(dir.path().into()),
+        )
+        .unwrap();
+        let path = dir.path().join("keymap.json");
+        assert!(path.is_file());
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        let hwnd = ptr::null_mut();
+        assert!(state.shortcut(u16::from(b'T'), ctrl, false, hwnd));
+        assert_eq!((state.tabs.len(), state.active), (2, 1));
+        state.activate(Control::New).unwrap();
+        assert!(state.shortcut(VK_RIGHT, ctrl, false, hwnd));
+        assert_eq!(state.active, 0);
+        assert!(state.shortcut(VK_RIGHT, ctrl, true, hwnd));
+        assert_eq!(state.active, 0);
+        assert!(state.shortcut(VK_LEFT, ctrl, false, hwnd));
+        assert_eq!(state.active, 2);
+        assert_eq!(state.keymap.action(VK_LEFT, alt), Some(Action::WordLeft));
+        assert_eq!(state.keymap.action(VK_RIGHT, alt), Some(Action::WordRight));
+        assert_eq!(state.keymap.action(VK_LEFT, Modifiers::default()), None);
+
+        let wait_for = |state: &mut State, ready: &dyn Fn(&State) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready(state) {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for keymap edit"
+                );
+                state.tick();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        std::fs::write(&path, r#"{"CONTROL+J":"next_tab", "alt+left":"word_left"}"#).unwrap();
+        let j = u16::from(b'J');
+        wait_for(&mut state, &|s| {
+            s.keymap.action(j, ctrl) == Some(Action::NextTab)
+        });
+        assert!(!state.shortcut(VK_RIGHT, ctrl, false, hwnd));
+        assert!(state.shortcut(j, ctrl, false, hwnd));
+        assert_eq!(state.active, 0);
+        std::fs::write(&path, r#"{"ctrl+badkey":"close_tab"}"#).unwrap();
+        wait_for(&mut state, &|s| s.error.is_some());
+        assert!(state.error.take().unwrap().contains("ctrl+badkey"));
+        assert!(state.shortcut(j, ctrl, false, hwnd));
+        assert_eq!(state.active, 1);
+        std::fs::write(&path, "{}").unwrap();
+        wait_for(&mut state, &|s| s.keymap.action(j, ctrl).is_none());
+        assert_eq!(state.tabs.len(), 3);
+    }
+
+    #[test]
     fn saving_font_settings_resizes_live_tabs_and_recovers_from_invalid_edits() {
         use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
@@ -1178,7 +1264,7 @@ mod tests {
             &program,
             &["/d".into(), "/q".into()],
             96,
-            Some(path.clone()),
+            Some(path.parent().unwrap().to_owned()),
         )
         .unwrap();
         assert!(path.is_file());
@@ -1226,7 +1312,7 @@ mod tests {
         std::fs::write(&path, r#"{"terminal":{"font_family":"Consolas"}}"#).unwrap();
         wait_for(&mut state, &|s| s.font_settings.font_family == "Consolas");
         assert_eq!(state.font_settings.font_size_px, 14.0);
-        let reopened = SettingsFile::open(path.clone());
+        let reopened = ConfigFile::<FontSettings>::open(path.clone());
         assert_eq!(reopened.current.as_ref().unwrap(), &state.font_settings);
         std::fs::remove_file(path).unwrap();
         wait_for(&mut state, &|s| s.font_settings == FontSettings::default());

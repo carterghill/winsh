@@ -137,6 +137,10 @@ Set the dedicated terminal’s font in `%APPDATA%\winsh\settings.json`. It
 defaults to Cascadia Mono at 14 logical pixels and applies edits to open tabs.
 [Font settings](docs/terminal.md#font-settings)
 
+Edit terminal shortcuts in `%APPDATA%\winsh\keymap.json`. By default,
+Ctrl+Left/Right switches tabs and Alt+Left/Right moves one word at the winsh
+prompt. Saved bindings apply to open windows. [Keyboard shortcuts](docs/terminal.md#keyboard-shortcuts)
+
 See [the shell guide](docs/shell.md) for current limits and a walkthrough of the
 Rust code, and [the syntax guide](docs/syntax.md) for the parser API.
 Inspect parsed syntax without executing it using the development example:

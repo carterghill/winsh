@@ -14,7 +14,10 @@ use windows_sys::Win32::{
     System::Threading::WaitForSingleObject,
 };
 
-const STARTER: &str = include_str!("../../assets/settings.json");
+pub(super) trait Config: Default + Clone + PartialEq {
+    const STARTER: &'static str;
+    fn parse(json: &str) -> io::Result<Self>;
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default)]
@@ -38,40 +41,47 @@ struct Settings {
     terminal: FontSettings,
 }
 
-fn read(path: &Path) -> io::Result<FontSettings> {
-    let json = match fs::read_to_string(path) {
-        Ok(json) => json,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(FontSettings::default()),
-        Err(error) => return Err(error),
-    };
-    let Settings { terminal } = serde_json::from_str(json.trim_start_matches('\u{feff}'))?;
-    // GDI's LF_FACESIZE includes the terminating UTF-16 NUL.
-    if terminal.font_family.trim().is_empty()
-        || terminal.font_family.contains('\0')
-        || terminal.font_family.encode_utf16().count() >= 32
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "font_family must be a Windows font name of 1 to 31 UTF-16 units",
-        ));
+impl Config for FontSettings {
+    const STARTER: &'static str = include_str!("../../assets/settings.json");
+
+    fn parse(json: &str) -> io::Result<Self> {
+        let Settings { terminal } = serde_json::from_str(json)?;
+        // GDI's LF_FACESIZE includes the terminating UTF-16 NUL.
+        if terminal.font_family.trim().is_empty()
+            || terminal.font_family.contains('\0')
+            || terminal.font_family.encode_utf16().count() >= 32
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "font_family must be a Windows font name of 1 to 31 UTF-16 units",
+            ));
+        }
+        if !(1.0..=256.0).contains(&terminal.font_size_px) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "font_size_px must be between 1 and 256",
+            ));
+        }
+        Ok(terminal)
     }
-    if !(1.0..=256.0).contains(&terminal.font_size_px) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "font_size_px must be between 1 and 256",
-        ));
-    }
-    Ok(terminal)
 }
 
-fn seed(path: &Path) -> io::Result<()> {
+fn read<T: Config>(path: &Path) -> io::Result<T> {
+    match fs::read_to_string(path) {
+        Ok(json) => T::parse(json.trim_start_matches('\u{feff}')),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(error),
+    }
+}
+
+fn seed(path: &Path, starter: &str) -> io::Result<()> {
     if path.try_exists()? {
         return Ok(());
     }
-    let directory = path.parent().expect("settings.json has a config directory");
+    let directory = path.parent().expect("config file has a parent directory");
     fs::create_dir_all(directory)?;
     let mut temp = tempfile::NamedTempFile::new_in(directory)?;
-    temp.write_all(STARTER.as_bytes())?;
+    temp.write_all(starter.as_bytes())?;
     match temp.persist_noclobber(path) {
         Ok(_) => Ok(()),
         Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
@@ -79,19 +89,19 @@ fn seed(path: &Path) -> io::Result<()> {
     }
 }
 
-pub(super) struct SettingsFile {
+pub(super) struct ConfigFile<T> {
     path: PathBuf,
     changes: Option<DirectoryChanges>,
     next_check: Instant,
-    pub current: Result<FontSettings, String>,
+    pub current: Result<T, String>,
 }
 
-impl SettingsFile {
+impl<T: Config> ConfigFile<T> {
     pub fn open(path: PathBuf) -> Self {
-        let seeded = seed(&path);
+        let seeded = seed(&path, T::STARTER);
         // Arm the directory notification before reading to also catch save-by-rename.
         let changes =
-            DirectoryChanges::open(path.parent().expect("settings.json has a config directory"));
+            DirectoryChanges::open(path.parent().expect("config file has a parent directory"));
         let current = seeded
             .and_then(|()| read(&path))
             .map_err(|err| format!("{}\n\n{err}", path.display()));
@@ -103,7 +113,7 @@ impl SettingsFile {
         }
     }
 
-    pub fn poll(&mut self) -> Option<Result<FontSettings, String>> {
+    pub fn poll(&mut self) -> Option<Result<T, String>> {
         let now = Instant::now();
         if now < self.next_check {
             return None;

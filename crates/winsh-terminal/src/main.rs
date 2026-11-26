@@ -13,7 +13,7 @@ fn main() {
             match option.to_str() {
                 Some("--help" | "-h") => {
                     window::message(
-                        "winsh terminal\n\nUsage: winsh-terminal [--shell <executable>] [-- <shell arguments>]\n\nBy default, launches winsh.exe beside this executable.\nBuild both executables with: cargo build --workspace\n\nCtrl+Shift+T / Ctrl+Shift+W: open / close tab\nCtrl+Tab / Ctrl+Shift+Tab: next / previous tab\nCtrl+Shift+V / Shift+Insert: paste\nCtrl+Shift+C: copy visible screen\nMouse wheel / Shift+PageUp / Shift+PageDown: scroll\nCtrl+C: interrupt input or the foreground program\nCtrl+Z: stop the foreground winsh job",
+                        "winsh terminal\n\nUsage: winsh-terminal [--shell <executable>] [-- <shell arguments>]\n\nBy default, launches winsh.exe beside this executable.\nBuild both executables with: cargo build --workspace\n\nView or edit terminal shortcuts in %APPDATA%\\winsh\\keymap.json. Saved bindings apply to open windows.\nUse the mouse wheel to scroll. Winsh accepts Ctrl+C to interrupt and Ctrl+Z to stop a foreground job.",
                         false,
                     );
                     return Ok(0);

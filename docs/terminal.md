@@ -66,10 +66,11 @@ New tabs start with the launcher's working directory, executable, and arguments.
 Click a tab to switch sessions. When the strip fills up, the chevrons reveal
 more tabs on either side. Drag the space beside the tabs to move the window.
 
-| Input | Behavior |
+| Default input | Behavior |
 | --- | --- |
-| + or Ctrl+Shift+T | Open a tab. |
-| Ctrl+Tab / Ctrl+Shift+Tab | Switch to the next / previous tab, wrapping at the ends. |
+| +, Ctrl+T, or Ctrl+Shift+T | Open a tab. |
+| Ctrl+Left / Ctrl+Right | Switch to the previous / next tab, wrapping at the ends. Ctrl+Shift+Tab / Ctrl+Tab also work. |
+| Alt+Left / Alt+Right | Move one word left / right at the winsh prompt. |
 | Tab's × or Ctrl+Shift+W | Close that tab or the active tab, respectively. Closing the last tab closes the window. |
 | Text, Enter, Backspace | Console input and editing supplied by the hosted program. |
 | Arrow keys, Home/End, Insert/Delete, F1–F12 | Terminal key sequences, including application cursor mode and modifiers. |
@@ -104,6 +105,21 @@ protocol replies share an input worker; the output worker parses directly into
 the screen model. ConPTY control and shutdown run independently of the window.
 Closing a session terminates its shell and descendants through a job object,
 and drains output while releasing ConPTY to avoid pipe deadlocks.
+
+## Keyboard shortcuts
+
+The dedicated terminal creates `%APPDATA%\winsh\keymap.json` beside
+`settings.json`. Each entry maps one key combination to an action. For
+example, change `"ctrl+right": "next_tab"` to `"ctrl+j": "next_tab"` and save.
+Ctrl+J will switch tabs immediately in open windows. Deleting a binding
+returns that combination to normal terminal input. An invalid edit keeps the
+last working bindings active. [Default keymap and supported actions](../crates/winsh-terminal/assets/keymap.json)
+
+Key names are case-insensitive. Combine `ctrl` (or `control`), `alt`, and
+`shift` in any order before the key. Supported keys are letters A–Z, digits
+0–9, F1–F12, the four arrows, Home, End, PageUp, PageDown, Tab, Insert,
+Delete, Backspace, Enter, Space, and Escape. Word actions send Alt+Left or
+Alt+Right to the hosted program, which handles movement in its own editor.
 
 ## Font settings
 

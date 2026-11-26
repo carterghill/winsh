@@ -16,7 +16,7 @@ pub enum Key {
     Tab,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Modifiers {
     pub shift: bool,
     pub alt: bool,

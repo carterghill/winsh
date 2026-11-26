@@ -45,6 +45,8 @@ pub(crate) struct ShellOptions {
     pub errexit: bool,
     pub nounset: bool,
     pub pipefail: bool,
+    pub prompt_subst: bool,
+    pub interactive_parameters: bool,
 }
 
 /// Explicit session state; the engine never changes the host cwd or environment.
@@ -141,8 +143,24 @@ impl Shell {
     pub fn last_status(&self) -> i32 {
         self.last_status
     }
-    /// Load interactive defaults, followed by the user's optional startup script.
+    /// Run the zsh-style hook once per primary prompt, with the command's status.
+    pub fn run_precmd(&mut self, io: &mut ShellIo) -> io::Result<Outcome> {
+        let status = self.last_status;
+        if self.functions.contains_key("precmd") {
+            let outcome = self.invoke(&["precmd".into()], io);
+            self.last_status = status;
+            if let Outcome::Exit(code) = outcome? {
+                return Ok(Outcome::Exit(code));
+            }
+        }
+        Ok(Outcome::Continue(status))
+    }
+    /// Load interactive defaults and the user's startup script, seeding it on first use.
     pub fn load_interactive_profile(&mut self, io: &mut ShellIo) -> io::Result<Outcome> {
+        #[cfg(windows)]
+        platform::windows_path::refresh(self, None);
+        self.options.interactive_parameters = true;
+        self.set_var("PS2", "> ".into());
         self.run("alias ls='ls --color --icons --directories-first'", io)?;
         #[cfg(windows)]
         let root = self
@@ -160,8 +178,10 @@ impl Shell {
                     .filter(|p| p.is_absolute())
             });
         if let Some(path) = root.map(|p| p.join("winsh").join("winshrc")) {
-            match path.try_exists() {
-                Ok(true) => {
+            match crate::prompt::ensure_profile(&path) {
+                Ok(()) => {
+                    // Profiles from before prompt configuration keep the original default.
+                    self.set_var("PS1", "%d $ ".into());
                     return crate::language_builtins::dispatch(
                         self,
                         "source",
@@ -169,11 +189,10 @@ impl Shell {
                         io,
                     );
                 }
-                Ok(false) => {}
                 Err(error) => io.err(format_args!("winsh: {}: {error}\n", path.display()))?,
             }
         }
-        Ok(Outcome::Continue(0))
+        self.run(crate::prompt::STARTER_PROFILE, io)
     }
     pub fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
@@ -488,10 +507,11 @@ impl Shell {
         }
         let mut saved = BTreeMap::new();
         for (name, word, append) in assignments {
+            let name = self.parameter_name(&name);
             if temporary && name != "OPTIND" {
                 saved
-                    .entry(name.clone())
-                    .or_insert_with(|| self.save_var(&name));
+                    .entry(name.to_owned())
+                    .or_insert_with(|| self.save_var(name));
             }
             let value = match expand::scalar(&word, self, io) {
                 Ok(value) => value,
@@ -503,16 +523,16 @@ impl Shell {
                 }
             };
             let mut joined = if append {
-                self.var(&name).unwrap_or_default().to_owned()
+                self.var(name).unwrap_or_default().to_owned()
             } else {
                 OsString::new()
             };
             joined.push(value);
             if temporary {
-                self.set_env(&name, joined);
-                self.variables.remove(&name);
+                self.set_env(name, joined);
+                self.variables.remove(name);
             } else {
-                self.set_var(&name, joined);
+                self.set_var(name, joined);
             }
         }
         if !temporary && let Some(failure) = redirect::apply(self, redirections, io)? {
@@ -575,6 +595,13 @@ impl Shell {
         if builtins::recognizes(name) {
             Ok(pipeline::builtin(self, arguments, io))
         } else if let Some(utility) = Utility::from_name(name) {
+            #[cfg(windows)]
+            let path_before_install = match (utility, &arguments[1..]) {
+                (Utility::Pkg, [verb, _]) if verb == "install" => {
+                    platform::windows_path::registered()
+                }
+                _ => None,
+            };
             let status = if let Some(executable) = &self.utility_executable {
                 let mut child_args = vec![executable.as_os_str().to_owned(), "--utility".into()];
                 child_args.extend_from_slice(arguments);
@@ -582,6 +609,10 @@ impl Shell {
             } else {
                 utility.run(self, &arguments[1..], io)?
             };
+            #[cfg(windows)]
+            if let Some(before) = path_before_install {
+                platform::windows_path::refresh(self, Some(&before));
+            }
             Ok(Outcome::Continue(status))
         } else {
             Ok(Outcome::Continue(self.run_program(arguments, None, io)?))
@@ -846,7 +877,17 @@ impl Shell {
     pub(crate) fn env(&self, name: &str) -> Option<&OsStr> {
         platform::env_value(&self.environment, name)
     }
+    // Keep cmd.exe's inherited PROMPT in the child environment. Interactive
+    // shell references to PROMPT and PS1 share a single shell parameter.
+    pub(crate) fn parameter_name<'a>(&self, name: &'a str) -> &'a str {
+        match (self.options.interactive_parameters, name) {
+            (true, "PROMPT") => "PS1",
+            (true, "PROMPT2") => "PS2",
+            _ => name,
+        }
+    }
     pub(crate) fn var(&self, name: &str) -> Option<&OsStr> {
+        let name = self.parameter_name(name);
         self.variables
             .get(name)
             .map(OsString::as_os_str)
@@ -872,6 +913,7 @@ impl Shell {
         self.environment.push((name.into(), value));
     }
     pub(crate) fn set_var(&mut self, name: &str, value: OsString) {
+        let name = self.parameter_name(name);
         if name == "OPTIND" {
             self.option_scan.assign_index(&value);
         }
@@ -883,6 +925,7 @@ impl Shell {
         }
     }
     pub(crate) fn unset(&mut self, name: &str) {
+        let name = self.parameter_name(name);
         if name == "OPTIND" {
             self.option_scan.index = 0;
         }

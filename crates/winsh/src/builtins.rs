@@ -3,7 +3,7 @@ use std::{ffi::OsString, fs, io, path::Path};
 use crate::{Outcome, Shell, ShellIo, platform};
 
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
-    ["cd", "pwd", "exit", "alias", "unalias"]
+    ["cd", "pwd", "exit", "alias", "unalias", "winsh_prompt_info"]
         .into_iter()
         .chain(crate::jobs::BUILTINS.iter().copied())
         .chain(crate::language_builtins::NAMES.iter().copied())
@@ -24,6 +24,13 @@ pub(crate) fn dispatch(
         Some("pwd") => pwd(shell, args, io)?,
         Some("cd") => cd(shell, args, io)?,
         Some("exit") => exit(shell, args, io)?,
+        Some("winsh_prompt_info") => {
+            if !args.is_empty() {
+                return fail(io, "winsh_prompt_info", "expected no arguments", 2).map(Some);
+            }
+            crate::prompt::set_prompt_info(shell);
+            Outcome::Continue(0)
+        }
         Some("alias") => Outcome::Continue(crate::aliases::define(shell, args, io)?),
         Some("unalias") => Outcome::Continue(crate::aliases::remove(shell, args, io)?),
         Some("kill") if shell.kill_self(args) => Outcome::Continue(0),

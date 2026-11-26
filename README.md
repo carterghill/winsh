@@ -59,8 +59,9 @@ pkg install python3
 python3 --version
 ~~~
 
-For other tools, find the package ID with `winget search`, then use it directly,
-for example `pkg install Git.Git`. Start winsh normally. Windows prompts for
+Install other tools by name, for example `pkg install lazygit` or
+`pkg install fzf`. If WinGet lists several matches, use the ID from the
+desired row, for example `pkg install Git.Git`. Windows prompts for
 administrator access when an installer needs it.
 [Installing Windows packages](docs/shell.md#installing-windows-packages)
 
@@ -101,6 +102,11 @@ Interactive `ls` shows colored names and folder icons in a directories-first
 grid. `ls -1` gives one entry per line, and `ls >files.txt` writes plain names.
 Use `alias ls` to inspect the default, or customize it in
 `%APPDATA%\winsh\winshrc`. [Aliases and startup configuration](docs/shell.md#aliases-and-startup-configuration)
+
+The first interactive launch creates that file with a Powerline-style prompt
+showing the OS icon, current directory, and Git branch. The original full-path
+`$` prompt is a commented option in the same file.
+You can use `PROMPT` or `PS1` to customize it. [Custom prompts](docs/shell.md#custom-prompts)
 
 Scripts use the same engine as the prompt. For example:
 

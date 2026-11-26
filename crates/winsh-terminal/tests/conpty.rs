@@ -61,7 +61,13 @@ impl Harness {
     }
 
     fn shell(history: &Path) -> Self {
-        Self::shell_with_profile(history, Path::new(env!("CARGO_TARGET_TMPDIR")))
+        let profile = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let config = profile.path().join("winsh");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::write(config.join("winshrc"), "PROMPT='%d $ '\n").unwrap();
+        let harness = Self::shell_with_profile(history, profile.path());
+        wait_for_prompt(&harness);
+        harness
     }
 
     fn shell_with_profile(history: &Path, appdata: &Path) -> Self {
@@ -74,7 +80,9 @@ impl Harness {
         // Isolate this child from the developer's history and startup script.
         let args = [
             OsString::from("-c"),
-            OsString::from(r#"WINSH_HISTORY_FILE="$1" APPDATA="$3" "$2""#),
+            OsString::from(
+                r#"WINSH_HISTORY_FILE="$1" APPDATA="$3" USERNAME=tester HOST=workstation.example "$2""#,
+            ),
             OsString::from("test"),
             history.into(),
             shell.clone().into(),
@@ -82,9 +90,7 @@ impl Harness {
         ];
         let terminal = Arc::new(Mutex::new(Terminal::new(40, 160)));
         let session = Session::spawn(&shell, &args, 40, 160, Arc::clone(&terminal)).unwrap();
-        let harness = Self { session, terminal };
-        wait_for_prompt(&harness);
-        harness
+        Self { session, terminal }
     }
 
     fn enter(&self, command: &str) {
@@ -222,6 +228,7 @@ fn winsh_interactive_ls_uses_profile_icons_colors_and_a_column_major_grid() {
         std::fs::write(listing.join(file), "").unwrap();
     }
     let h = Harness::shell_with_profile(Path::new(""), tmp.path());
+    wait_for_prompt(&h);
     h.enter(&format!(
         "cd '{}'",
         listing.display().to_string().replace('\'', "'\\''")
@@ -250,6 +257,54 @@ fn winsh_interactive_ls_uses_profile_icons_colors_and_a_column_major_grid() {
     }
     h.enter("show | cat");
     h.wait_for("\nDownloads\nPictures\nPublic\naaa.log\nzzz.log");
+    h.enter("exit 0");
+    h.wait_for_exit(0);
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_new_profile_and_custom_prompt_in_a_live_terminal() {
+    let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let h = Harness::shell_with_profile(Path::new(""), tmp.path());
+    h.wait_for("winsh-terminal ");
+    let profile = std::fs::read_to_string(tmp.path().join("winsh/winshrc")).unwrap();
+    assert!(
+        profile.find("# PROMPT='%d $ '").unwrap()
+            < profile.find("\nPROMPT='$(winsh_powerline)'").unwrap()
+    );
+    {
+        let terminal = h.terminal.lock().unwrap();
+        let screen = terminal.screen();
+        let row = (0..screen.size().0)
+            .find(|&r| screen.cell(r, 1).unwrap().contents() == "\u{f17a}")
+            .unwrap();
+        let joins = (0..screen.size().1)
+            .map(|c| screen.cell(row, c).unwrap())
+            .filter(|cell| cell.contents() == "")
+            .collect::<Vec<_>>();
+        assert!(joins.len() >= 2);
+        assert_eq!(joins[0].fgcolor(), vt100::Color::Rgb(224, 229, 234));
+        assert_eq!(joins[0].bgcolor(), vt100::Color::Rgb(59, 133, 134));
+        assert_eq!(joins.last().unwrap().bgcolor(), vt100::Color::Default);
+    }
+    h.enter(
+        "label() { printf 'folder-%s' '%1~'; }; PS1='%F{cyan}$(label)%f [%?]> '; cd src; false",
+    );
+    h.wait_for("\nfolder-src [1]>");
+    {
+        let terminal = h.terminal.lock().unwrap();
+        let screen = terminal.screen();
+        let row = (0..screen.size().0)
+            .find(|&r| screen.cell(r, 0).unwrap().contents() == "f")
+            .unwrap();
+        assert!(matches!(
+            screen.cell(row, 0).unwrap().fgcolor(),
+            vt100::Color::Idx(6 | 14)
+        ));
+    }
+    // Edit in the middle of a line following a colored prompt.
+    h.session.write(b"echo ac\x1b[Db\r".to_vec()).unwrap();
+    h.wait_for("\nabc\nfolder-src [0]>");
     h.enter("exit 0");
     h.wait_for_exit(0);
 }

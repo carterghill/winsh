@@ -14,6 +14,7 @@ mod jobs;
 mod language_builtins;
 mod pipeline;
 mod platform;
+mod prompt;
 mod redirect;
 mod shell;
 mod streams;
@@ -22,6 +23,7 @@ mod utilities;
 
 pub use completion::CompletionContext;
 pub use jobs::{interrupt_foreground, stop_foreground};
+pub use prompt::Prompt;
 pub use shell::{Outcome, Shell};
 pub use streams::ShellIo;
 pub use traps::notify_signal;

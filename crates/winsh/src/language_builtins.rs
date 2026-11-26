@@ -8,7 +8,7 @@ use std::{
 pub(crate) const NAMES: &[&str] = &[
     ":", "true", "false", "echo", "printf", "test", "[", "export", "unset", "local", "set",
     "shift", "return", "break", "continue", ".", "source", "read", "command", "getopts", "trap",
-    "exec",
+    "exec", "setopt", "unsetopt",
 ];
 pub(crate) fn dispatch(
     shell: &mut Shell,
@@ -85,6 +85,7 @@ pub(crate) fn dispatch(
                 if !crate::syntax::valid_name(key) {
                     return fail(io, name, "invalid identifier", 1);
                 }
+                let key = shell.parameter_name(key);
                 if name == "local" {
                     let saved = shell.save_local(key);
                     if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -134,6 +135,17 @@ pub(crate) fn dispatch(
             Ok(()) => 0,
             Err(message) => return fail(io, name, message, 2),
         },
+        "setopt" | "unsetopt" => {
+            let [option] = args else {
+                return fail(io, name, "expected PROMPT_SUBST", 2);
+            };
+            let option = option.to_string_lossy().replace('_', "");
+            if !option.eq_ignore_ascii_case("promptsubst") {
+                return fail(io, name, "only PROMPT_SUBST is supported", 2);
+            }
+            shell.options.prompt_subst = name == "setopt";
+            0
+        }
         "shift" => {
             let n = match count(args, 1) {
                 Ok(n) => n,

@@ -7,6 +7,7 @@ publish.workspace = true
 description = "A native Windows shell with Bash-compatible syntax."
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 regex = "1"
 unicode-width = "0.2"
 rustyline = { version = "17", default-features = false, features = ["with-file-history", "custom-bindings"] }
@@ -22,7 +23,7 @@ rustix = { version = "1", features = ["termios"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1"
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Environment", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [lints]
 workspace = true

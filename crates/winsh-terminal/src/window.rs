@@ -514,6 +514,18 @@ impl State {
                     }
                     let (foreground, background) = cell_colors(cell);
                     let contents = cell.contents();
+                    let x = padding + i32::from(column) * self.fonts.width;
+                    let y = origin_y + i32::from(row) * self.fonts.height;
+                    if contents == "\u{e0b0}" {
+                        let rect = RECT {
+                            left: x,
+                            top: y,
+                            right: x + self.fonts.width,
+                            bottom: y + self.fonts.height,
+                        };
+                        paint_separator(memory, rect, foreground, background);
+                        continue;
+                    }
                     let symbol = self.symbols.glyph(contents);
                     let mut wide = cell.is_wide();
                     if symbol.is_some()
@@ -525,8 +537,6 @@ impl State {
                         cells.next();
                         wide = true;
                     }
-                    let x = padding + i32::from(column) * self.fonts.width;
-                    let y = origin_y + i32::from(row) * self.fonts.height;
                     let width = self.fonts.width * if wide { 2 } else { 1 };
                     let rect = RECT {
                         left: x,
@@ -1015,6 +1025,38 @@ fn copy_text(hwnd: HWND, text: &str) {
 
 const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
     red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
+}
+
+// A Powerline join meets both neighboring backgrounds edge to edge. The
+// inset used for ordinary icons would leave gaps above and below the wedge.
+fn paint_separator(dc: HDC, rect: RECT, foreground: u32, background: u32) {
+    // SAFETY: the paint DC is live and the stock brush and pen are borrowed.
+    unsafe {
+        let brush = GetStockObject(DC_BRUSH);
+        let previous_brush = SelectObject(dc, brush);
+        let previous_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        let previous_color = SetDCBrushColor(dc, background);
+        FillRect(dc, &rect, brush);
+        SetDCBrushColor(dc, foreground);
+        let corners = [
+            POINT {
+                x: rect.left,
+                y: rect.top,
+            },
+            POINT {
+                x: rect.right,
+                y: rect.top + (rect.bottom - rect.top) / 2,
+            },
+            POINT {
+                x: rect.left,
+                y: rect.bottom,
+            },
+        ];
+        Polygon(dc, corners.as_ptr(), corners.len() as i32);
+        SetDCBrushColor(dc, previous_color);
+        SelectObject(dc, previous_pen);
+        SelectObject(dc, previous_brush);
+    }
 }
 
 fn cell_colors(cell: &vt100::Cell) -> (u32, u32) {

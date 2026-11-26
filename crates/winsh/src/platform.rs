@@ -7,6 +7,8 @@ use std::{
 
 #[cfg(windows)]
 pub(crate) mod addresses;
+#[cfg(windows)]
+pub(crate) mod windows_path;
 
 pub(crate) fn env_name_eq(key: &OsStr, name: &str) -> bool {
     if cfg!(windows) {

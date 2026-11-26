@@ -53,16 +53,21 @@ if `pymanager.exe` is missing from PATH. It then runs `pymanager.exe install 3`
 to install the interpreter. Check the result with `python3 --version`.
 [Python on Windows](https://docs.python.org/3/using/windows.html#installing-runtimes)
 
-For other packages, use the exact ID from WinGet's search results.
+For other packages, pass the name, moniker, or package ID. Winsh passes it
+to WinGet as a single query. Quote names containing spaces. If WinGet lists
+several matches, rerun the command with the ID from the desired row.
 
 ~~~sh
-winget search git
+pkg install lazygit
+pkg install fzf
 pkg install Git.Git
 ~~~
 
 `pkg install` takes one package at a time. WinGet handles package selection
 from your configured sources, license prompts, and any required elevation.
-If an installer adds a directory to PATH, open a fresh terminal to pick it up.
+An interactive winsh session picks up directories from the Windows user and
+system PATH at startup. After a foreground `pkg install`, winsh appends newly
+registered directories to the session PATH so you can run the tool immediately.
 If winsh cannot find `winget.exe`, install or update Microsoft's App Installer
 and check `winget --version`. [Microsoft's WinGet guide](https://learn.microsoft.com/en-us/windows/package-manager/winget/)
 
@@ -91,8 +96,9 @@ alias ls='ls --color --icons --directories-first'
 
 Winsh then reads `%APPDATA%\winsh\winshrc` on Windows. On Unix it reads
 `$XDG_CONFIG_HOME/winsh/winshrc`, defaulting to `~/.config/winsh/winshrc`.
-Create the directory and save the file as UTF-8 to keep personal aliases
-across launches. Startup configuration applies only to the interactive prompt.
+On first interactive launch, Winsh creates the directory and a UTF-8
+startup file with two prompt examples. It preserves existing startup files.
+You can also add aliases, functions, and exports here.
 Scripts, `winsh -c`, and piped input start with an empty alias table.
 
 ~~~sh
@@ -110,6 +116,52 @@ replacement controls variable expansion and argument boundaries at invocation.
 Aliases work in pipelines, with redirection, and in subshells. Use a shell
 function for a shortcut whose body contains multiple commands. `unalias -a`
 clears the session's alias table.
+
+## Custom prompts
+
+The default Powerline-style prompt connects a light OS badge, a teal directory,
+and a green Git segment with chevrons. The path starts with `~` under your
+home directory and highlights the current folder in bold. Inside a repository
+the Git segment shows the current branch or the short commit ID for a detached HEAD.
+The [starter winshrc](../crates/winsh/winshrc) defines the colors and icons in
+`winsh_powerline` and includes the original full-path `$` prompt as a commented option.
+To switch, comment out the active line and uncomment the other. An existing
+profile without a prompt definition continues to use the full-path prompt.
+
+The `winsh_prompt_info` builtin fills the function’s local `prompt_os`,
+`prompt_parent`, `prompt_folder`, and `prompt_branch` variables. Their values
+are escaped for use in a zsh prompt. `prompt_branch` is empty outside a repository.
+
+Set `PROMPT` or `PS1` to change the primary prompt.
+`PROMPT2` and `PS2` control the continuation prompt.
+Assignments made interactively take effect at the next prompt. To load edits
+to the file in an open Windows session, run `source "$APPDATA/winsh/winshrc"`.
+
+| Zsh escape | Displays |
+| --- | --- |
+| `%n`, `%m`, `%M` | User, short hostname, or full hostname. |
+| `%d`, `%/`, `%~` | Working directory. `%~` abbreviates the home directory to `~`. `%1~` shows the current folder. |
+| `%#`, `%%` | Prompt symbol (`%`, or `#` when elevated) or a literal percent sign. |
+| `%?`, `%(?.yes.no)` | Previous command's exit status, or text selected by whether it succeeded. |
+| `%T`, `%*`, `%D{%Y-%m-%d}` | Local time, time with seconds, or a formatted date. |
+| `%F{cyan}…%f`, `%K{blue}…%k` | Foreground and background colors. Named, 0–255 indexed, and `#rrggbb` colors are supported. |
+| `%B…%b`, `%U…%u`, `%S…%s` | Bold, underline, and reverse video. |
+
+The starter enables `setopt PROMPT_SUBST`. Use single quotes around a
+template to defer variables, arithmetic, and `$(command)` until the next
+prompt. This example includes the previous command's exit status after a failure.
+
+~~~sh
+setopt PROMPT_SUBST
+status_marker() { printf '[exit %s]' "$?"; }
+PROMPT='%1~ %(?..$(status_marker) )%# '
+~~~
+
+Winsh expands substitutions before percent escapes. A shell function named
+`precmd` runs before each new primary prompt and can update `PROMPT`
+in the current shell. Both mechanisms preserve the previous command's status.
+Prompt functions use Winsh shell syntax. Zsh plugin frameworks, right-hand
+prompts, and prompt truncation are outside the supported subset.
 
 ## Interactive history
 
@@ -562,7 +614,7 @@ descriptors (`{fd}>file`), and descriptors above 2 remain unsupported. There is 
 special `/dev/null` or `/dev/fd` path translation; use Windows native paths/devices
 such as `NUL` where appropriate.
 
-Arbitrary shebang dispatch, CDPATH lookup, configurable prompts, and `disown`
+Arbitrary shebang dispatch, CDPATH lookup, and `disown`
 remain outside the supported subset.
 
 ## Following a command through the code

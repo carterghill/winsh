@@ -171,9 +171,12 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
     loop {
         if interactive && pending.is_empty() {
             shell.report_finished_jobs(streams)?;
+            if let Outcome::Exit(code) = shell.run_precmd(streams)? {
+                return Ok(code);
+            }
         }
         let mut line = String::new();
-        let read = input.read_line(shell, &pending, &mut line);
+        let read = input.read_line(shell, streams, &pending, &mut line);
         if matches!(&read, Err(error) if error.kind() == io::ErrorKind::Interrupted) {
             pending.clear();
             if let Outcome::Exit(status) = shell.interrupt_input(streams)? {

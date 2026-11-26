@@ -1,5 +1,6 @@
 //! Line editing and per-user history for the interactive CLI.
 use std::{
+    borrow::Cow,
     env, fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -19,13 +20,14 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use winsh::{CompletionContext, Shell};
+use winsh::{CompletionContext, Shell, ShellIo};
 
 use crate::console;
 
 struct ShellCompleter {
     session: CompletionContext,
     pending: String,
+    styled_prompt: String,
 }
 
 impl Completer for ShellCompleter {
@@ -55,7 +57,15 @@ impl Hinter for ShellCompleter {
     type Hint = String;
 }
 impl Validator for ShellCompleter {}
-impl Highlighter for ShellCompleter {}
+impl Highlighter for ShellCompleter {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        default: bool,
+    ) -> Cow<'b, str> {
+        Cow::Borrowed(if default { &self.styled_prompt } else { prompt })
+    }
+}
 impl Helper for ShellCompleter {}
 
 type LineEditor = Editor<ShellCompleter, DefaultHistory>;
@@ -88,23 +98,21 @@ impl Input {
     pub fn read_line(
         &mut self,
         shell: &Shell,
+        streams: &mut ShellIo,
         pending: &str,
         line: &mut String,
     ) -> io::Result<usize> {
         if let Self::Redirected(file) = self {
             return console::read_line_unbuffered(file, line);
         }
-        let prompt = if pending.is_empty() {
-            format!("{} $ ", shell.cwd().display())
-        } else {
-            "> ".to_owned()
-        };
+        let prompt = shell.render_prompt(!pending.is_empty(), streams)?;
         if let Self::Edited(editor) = self {
             editor.lines.set_helper(Some(ShellCompleter {
                 session: shell.completion_context(),
                 pending: pending.to_owned(),
+                styled_prompt: prompt.display,
             }));
-            return match editor.lines.readline(&prompt) {
+            return match editor.lines.readline(&prompt.visible) {
                 Ok(source) => {
                     *line = source;
                     #[cfg(windows)]
@@ -119,7 +127,7 @@ impl Input {
                 Err(error) => Err(io::Error::other(error)),
             };
         }
-        write!(io::stderr(), "{prompt}")?;
+        write!(io::stderr(), "{}", prompt.display)?;
         io::stderr().flush()?;
         let read = console::read_line(line);
         if matches!(&read, Ok(0))

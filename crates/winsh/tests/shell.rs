@@ -371,7 +371,7 @@ fn pkg_installs_python_runtime_and_reuses_its_manager() {
 
 #[cfg(windows)]
 #[test]
-fn pkg_uses_exact_ids_and_preserves_install_failures() {
+fn pkg_passes_names_and_ids_as_queries_and_preserves_install_failures() {
     let mut f = Fixture::new();
     f.run("export PATH=.");
     for source in [
@@ -386,10 +386,18 @@ fn pkg_uses_exact_ids_and_preserves_install_failures() {
     assert_eq!(f.run("pkg install Git.Git").status(), 127);
     assert!(f.err().contains("App Installer"));
     fs::copy(helper(), f.root.0.join("winget.exe")).unwrap();
-    assert_eq!(f.run("command pkg install 'one & two' >args").status(), 0);
+    for query in ["lazygit", "fzf", "Git.Git", "one & two"] {
+        let command = format!("command pkg install '{query}' >args");
+        assert_eq!(f.run(&command).status(), 0);
+        assert_eq!(
+            fs::read_to_string(f.root.0.join("args")).unwrap(),
+            format!("winget install\n[--query]\n[{query}]\n")
+        );
+    }
     assert_eq!(
-        fs::read_to_string(f.root.0.join("args")).unwrap(),
-        "winget install\n[--exact]\n[--id]\n[one & two]\n"
+        f.run("WINSH_TEST_INSTALL_STATUS=17 pkg install fzf")
+            .status(),
+        17
     );
     assert_eq!(
         f.run("WINSH_TEST_INSTALL_STATUS=23 pkg install python3")
@@ -1243,6 +1251,143 @@ fn aliases_preserve_words_self_references_and_session_scope() {
 }
 
 #[test]
+fn simultaneous_first_sessions_share_a_complete_starter_profile() {
+    let root = TempDir::new();
+    let config = if cfg!(windows) {
+        "APPDATA"
+    } else {
+        "XDG_CONFIG_HOME"
+    };
+    let profile = root.0.join("winsh/winshrc");
+    let result = Command::new(env!("CARGO_BIN_EXE_winsh"))
+        .env(config, &root.0)
+        .args(["-c", "true"])
+        .output()
+        .unwrap();
+    assert!(result.status.success() && !profile.exists());
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                let mut shell = Shell::with_environment(
+                    root.0.clone(),
+                    [
+                        (config.into(), root.0.clone().into_os_string()),
+                        ("HOME".into(), root.0.clone().into_os_string()),
+                        ("GIT_DIR".into(), root.0.join("no-repo").into_os_string()),
+                    ],
+                )
+                .unwrap();
+                let mut streams = ShellIo::inherited();
+                start.wait();
+                assert_eq!(
+                    shell
+                        .load_interactive_profile(&mut streams)
+                        .unwrap()
+                        .status(),
+                    0
+                );
+                let prompt = shell.render_prompt(false, &mut streams).unwrap();
+                assert!(prompt.visible.ends_with("   ~  "), "{}", prompt.visible);
+                assert!(prompt.display.contains("\x1b[48;2;59;133;134m"));
+            });
+        }
+    });
+    assert_eq!(
+        fs::read_to_string(profile).unwrap(),
+        include_str!("../winshrc")
+    );
+}
+
+#[test]
+fn powerline_prompt_tracks_worktree_branch_and_quotes_names_as_text() {
+    let mut f = Fixture::new();
+    let root = &f.root.0;
+    let work = root.join("project%F{red}");
+    let sub = work.join("src");
+    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir(root.join("metadata")).unwrap();
+    fs::write(work.join(".git"), "gitdir: ../metadata\n").unwrap();
+    let head = root.join("metadata/HEAD");
+    fs::write(&head, "ref: refs/heads/feature/%n\n").unwrap();
+    let config = if cfg!(windows) {
+        "APPDATA"
+    } else {
+        "XDG_CONFIG_HOME"
+    };
+    let setup = format!(
+        "export {config}={} HOME={}; unset GIT_DIR; cd {}",
+        quote(root),
+        quote(root),
+        quote(&sub)
+    );
+    assert_eq!(f.run(&setup).status(), 0);
+    f.shell.load_interactive_profile(&mut f.io).unwrap();
+    let prompt = f.shell.render_prompt(false, &mut f.io).unwrap();
+    assert!(
+        prompt
+            .visible
+            .ends_with("  ~/project%F{red}/src    feature/%n  "),
+        "{}",
+        prompt.visible
+    );
+    assert!(prompt.display.contains("/\x1b[1msrc\x1b[22m "));
+    assert!(prompt.display.contains("\x1b[48;2;123;168;118m"));
+    fs::write(&head, "ffbbccdd01234567890123456789012345678901\n").unwrap();
+    assert!(
+        f.shell
+            .render_prompt(false, &mut f.io)
+            .unwrap()
+            .visible
+            .ends_with(" ffbbccdd  ")
+    );
+    assert!(f.err().is_empty(), "{}", f.err());
+}
+
+#[test]
+fn prompt_expands_session_state_and_preserves_the_previous_command_status() {
+    let mut f = Fixture::new();
+    let config = if cfg!(windows) {
+        "APPDATA"
+    } else {
+        "XDG_CONFIG_HOME"
+    };
+    let home = quote(&f.root.0);
+    f.run(&format!("export {config}={home} HOME={home}"));
+    f.shell.load_interactive_profile(&mut f.io).unwrap();
+    assert_eq!(f.run("PROMPT2='more> '; mkdir sub; cd sub; label() { printf '(%s)' \"$?\"; }; PS1='%~ %1~ %d $(label) %(?.ok.%F{red}bad-%?%f) %% '; false").status(), 1);
+    let prompt = f.shell.render_prompt(false, &mut f.io).unwrap();
+    let directory = &f.root.0.join("sub");
+    let prefix = format!(
+        "{} sub {} (1) ",
+        Path::new("~").join("sub").display(),
+        directory.display()
+    );
+    assert_eq!(prompt.display, format!("{prefix}\x1b[31mbad-1\x1b[39m % "));
+    assert_eq!(prompt.visible, format!("{prefix}bad-1 % "));
+    assert_eq!(f.shell.last_status(), 1);
+    assert_eq!(
+        f.shell.render_prompt(true, &mut f.io).unwrap().visible,
+        "more> "
+    );
+    f.run("precmd() { PROMPT=\"last=$?\"; }; false");
+    f.shell.run_precmd(&mut f.io).unwrap();
+    assert_eq!(
+        f.shell.render_prompt(false, &mut f.io).unwrap().visible,
+        "last=1"
+    );
+    assert_eq!(f.shell.last_status(), 1);
+    f.run("unset -f precmd; unsetopt promptsubst; PROMPT='$(label) %?'; false");
+    assert_eq!(
+        f.shell.render_prompt(false, &mut f.io).unwrap().display,
+        "$(label) 1"
+    );
+    f.run("echo \"$PS1\" \"$PS2\"");
+    assert_eq!(f.out(), "$(label) %? more> \n");
+    assert!(f.err().is_empty());
+}
+
+#[test]
 fn personal_profile_can_remove_the_default_and_only_loads_at_the_prompt() {
     let mut f = Fixture::new();
     let config_var = if cfg!(windows) {
@@ -1269,6 +1414,10 @@ fn personal_profile_can_remove_the_default_and_only_loads_at_the_prompt() {
     assert_eq!(f.run("alias ls").status(), 1);
     f.run("greet");
     assert_eq!(f.out(), "from-profile\n");
+    assert_eq!(
+        fs::read_to_string(dir.join("winshrc")).unwrap(),
+        "unalias ls\nalias greet='echo from-profile'\n"
+    );
     let result = Command::new(env!("CARGO_BIN_EXE_winsh"))
         .env(config_var, &profile_root)
         .args(["-c", "alias"])

@@ -12,6 +12,7 @@ function Write-Status([string]$Message) {
 
 function Get-SourceStamp {
     $files = @(
+        Get-ChildItem -LiteralPath (Join-Path $root 'windows') -File
         foreach ($name in 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo\config', '.cargo\config.toml') {
             Get-Item -LiteralPath (Join-Path $root $name) -ErrorAction SilentlyContinue
         }

@@ -68,16 +68,21 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
     let mut state = Box::new(State::new(program, arguments, dpi, config_dir)?);
     // SAFETY: static system cursor, borrowed for the window class lifetime.
     let cursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_IBEAM) };
-    let class = WNDCLASSW {
+    // SAFETY: 101 is the integer icon resource in windows/winsh.rc.
+    // LoadIconW returns a shared handle that lives with the module.
+    let icon = unsafe { LoadIconW(instance, 101 as *const u16) };
+    let class = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
         lpfnWndProc: Some(window_proc),
         hInstance: instance,
+        hIcon: icon,
         hCursor: cursor,
         lpszClassName: w!("WinshTerminalWindow"),
         ..Default::default()
     };
     // SAFETY: class fields have valid static pointers, module, and callback.
-    if unsafe { RegisterClassW(&class) } == 0 {
+    if unsafe { RegisterClassExW(&class) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let mut rectangle = RECT {

@@ -171,8 +171,10 @@ If the editor reports an unsupported toolchain or cannot resolve standard macros
 such as `matches!` and `write!`, update stable and restart the language server or
 reopen the project. In Zed, ensure the selected project toolchain is `stable`.
 
+Build both Windows release executables with the [compile script](compile.cmd).
+
 ~~~powershell
-cargo build --workspace --release
+.\compile.cmd
 ~~~
 
 The release executables are `target/release/winsh.exe` and

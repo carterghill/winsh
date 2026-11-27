@@ -63,6 +63,8 @@ using Windows argument quoting. `--help` displays a controls and usage dialog.
 
 Each title-bar tab hosts a separate shell with its own screen and scrollback.
 New tabs start with the launcher's working directory, executable, and arguments.
+Each winsh tab shows the name of its current folder and updates when you change
+directories. At a drive root, the tab shows the drive (for example, `C:\`).
 Click a tab to switch sessions. When the strip fills up, the chevrons reveal
 more tabs on either side. Drag the space beside the tabs to move the window.
 

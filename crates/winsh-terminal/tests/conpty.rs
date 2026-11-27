@@ -267,6 +267,10 @@ fn winsh_new_profile_and_custom_prompt_in_a_live_terminal() {
     let tmp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let h = Harness::shell_with_profile(Path::new(""), tmp.path());
     h.wait_for("winsh-terminal ");
+    assert_eq!(
+        h.terminal.lock().unwrap().take_title().as_deref(),
+        Some("winsh-terminal")
+    );
     let profile = std::fs::read_to_string(tmp.path().join("winsh/winshrc")).unwrap();
     assert!(
         profile.find("# PROMPT='%d $ '").unwrap()
@@ -291,6 +295,10 @@ fn winsh_new_profile_and_custom_prompt_in_a_live_terminal() {
         "label() { printf 'folder-%s' '%1~'; }; PS1='%F{cyan}$(label)%f [%?]> '; cd src; false",
     );
     h.wait_for("\nfolder-src [1]>");
+    assert_eq!(
+        h.terminal.lock().unwrap().take_title().as_deref(),
+        Some("src")
+    );
     {
         let terminal = h.terminal.lock().unwrap();
         let screen = terminal.screen();

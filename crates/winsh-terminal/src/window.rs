@@ -189,7 +189,6 @@ struct Tab {
     terminal: Arc<Mutex<Terminal>>,
     session: Session,
     title: String,
-    default_title: String,
     text: TextInput,
     wheel: i32,
 }
@@ -199,24 +198,13 @@ impl Tab {
         program: &Path,
         arguments: &[OsString],
         (rows, columns): (u16, u16),
-        number: usize,
     ) -> io::Result<Self> {
         let terminal = Arc::new(Mutex::new(Terminal::new(rows, columns)));
         let session = Session::spawn(program, arguments, rows, columns, Arc::clone(&terminal))?;
-        let shell = program
-            .file_stem()
-            .unwrap_or(program.as_os_str())
-            .to_string_lossy();
-        let default_title = if number == 1 {
-            shell.into_owned()
-        } else {
-            format!("{shell} {number}")
-        };
         Ok(Self {
             terminal,
+            title: session.initial_title.clone(),
             session,
-            title: default_title.clone(),
-            default_title,
             text: TextInput::default(),
             wheel: 0,
         })
@@ -226,7 +214,6 @@ impl Tab {
 struct State {
     tabs: Vec<Tab>,
     active: usize,
-    next_number: usize,
     program: PathBuf,
     arguments: Vec<OsString>,
     layout: Layout,
@@ -272,9 +259,8 @@ impl State {
         let fonts = Fonts::new(dpi, &font_settings)?;
         let size = (30, 100);
         let mut state = Self {
-            tabs: vec![Tab::spawn(program, arguments, size, 1)?],
+            tabs: vec![Tab::spawn(program, arguments, size)?],
             active: 0,
-            next_number: 2,
             program: program.to_owned(),
             arguments: arguments.to_owned(),
             layout: Layout::new(dpi, 0, 1, 0, 0),
@@ -343,8 +329,7 @@ impl State {
             Control::Tab(index) => self.select(index),
             Control::CloseTab(index) => self.close(index),
             Control::New => {
-                let tab = Tab::spawn(&self.program, &self.arguments, self.size, self.next_number)?;
-                self.next_number += 1;
+                let tab = Tab::spawn(&self.program, &self.arguments, self.size)?;
                 self.tabs.push(tab);
                 self.select(self.tabs.len() - 1);
             }
@@ -518,12 +503,11 @@ impl State {
                 redraw |= terminal.take_dirty();
             }
             if let Some(title) = terminal.take_title() {
-                let title =
-                    if title.is_empty() || self.program.file_stem() == Some(OsStr::new(&title)) {
-                        tab.default_title.clone()
-                    } else {
-                        title
-                    };
+                let title = if title.is_empty() {
+                    tab.session.initial_title.clone()
+                } else {
+                    title
+                };
                 if tab.title != title {
                     tab.title = title;
                     self.title_dirty |= index == self.active;

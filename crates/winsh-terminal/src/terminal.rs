@@ -78,6 +78,15 @@ impl Callbacks for Responses {
         );
     }
 
+    fn unhandled_osc(&mut self, screen: &mut Screen, params: &[&[u8]]) {
+        // vt100 splits on every semicolon, including ones inside a folder name.
+        if let [b"0" | b"2", parts @ ..] = params
+            && parts.len() > 1
+        {
+            self.set_window_title(screen, &parts.join(&b';'));
+        }
+    }
+
     fn unhandled_escape(&mut self, _: &mut Screen, i1: Option<u8>, _: Option<u8>, ch: u8) {
         if i1.is_none() && ch == b'Z' {
             self.bytes.extend_from_slice(b"\x1b[?1;2c");

@@ -55,6 +55,7 @@ pub enum Event {
 }
 
 pub struct Session {
+    pub(crate) initial_title: String,
     stop_event: Vec<u16>,
     input: mpsc::Sender<Vec<u8>>,
     control: mpsc::Sender<Control>,
@@ -77,7 +78,10 @@ impl Session {
             NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
         );
         let stop_event = wide(OsStr::new(&name))?;
-        let mut resources = Resources::create(program, arguments, rows, columns, &name)?;
+        let cwd = std::env::current_dir()?;
+        let initial_title = cwd.file_name().unwrap_or(cwd.as_os_str());
+        let mut resources =
+            Resources::create(program, arguments, rows, columns, &name, initial_title)?;
         let mut output = resources.console.output.take().expect("new output pipe");
         let (input, writes) = mpsc::channel::<Vec<u8>>();
         let (control, controls) = mpsc::channel();
@@ -178,6 +182,7 @@ impl Session {
             let _ = events_send.send(Event::Exited(status));
         });
         Ok(Self {
+            initial_title: initial_title.to_string_lossy().into_owned(),
             stop_event,
             input,
             control,
@@ -252,6 +257,7 @@ impl Resources {
         rows: u16,
         columns: u16,
         stop_event: &str,
+        initial_title: &OsStr,
     ) -> io::Result<Self> {
         let program = program.canonicalize()?;
         let application = wide(program.as_os_str())?;
@@ -282,7 +288,7 @@ impl Resources {
         let attributes = Attributes::new(handle)?;
         let job = job()?;
         let mut startup = STARTUPINFOEXW::default();
-        let mut title = wide(program.file_stem().unwrap_or(program.as_os_str()))?;
+        let mut title = wide(initial_title)?;
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         startup.StartupInfo.lpTitle = title.as_mut_ptr();
         // Explicit null standard handles let ConPTY populate console handles.

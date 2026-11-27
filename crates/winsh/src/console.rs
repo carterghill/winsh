@@ -45,19 +45,26 @@ pub fn read_line_unbuffered(input: &mut File, line: &mut String) -> io::Result<u
 }
 
 #[cfg(windows)]
-pub use windows::{Handler, read_line};
+pub use windows::{Handler, read_line, set_directory_title};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows {
-    use std::io;
+    use std::{io, os::windows::ffi::OsStrExt, path::Path};
     use windows_sys::Win32::{
         Foundation::{ERROR_OPERATION_ABORTED, GetLastError, SetLastError},
         System::Console::{
             CONSOLE_READCONSOLE_CONTROL, CTRL_BREAK_EVENT, CTRL_C_EVENT, GetConsoleCP,
-            GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
+            GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE, SetConsoleCtrlHandler, SetConsoleTitleW,
         },
     };
+
+    pub fn set_directory_title(cwd: &Path) {
+        let name = cwd.file_name().unwrap_or(cwd.as_os_str());
+        let title: Vec<_> = name.encode_wide().chain([0]).collect();
+        // SAFETY: title is NUL terminated and lives through the call.
+        unsafe { SetConsoleTitleW(title.as_ptr()) };
+    }
 
     // Protect the shell process. ReadConsoleW reports interrupted input itself,
     // and native child exit status reports interruption during execution.

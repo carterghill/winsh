@@ -58,6 +58,8 @@ fn terminal_answers_queries_and_sanitizes_window_titles() {
     terminal.process(b"\x1b]2;project\x07");
     assert_eq!(terminal.take_title().as_deref(), Some("project"));
     assert_eq!(terminal.take_title(), None);
+    terminal.process(b"\x1b]0;work;archive\x07");
+    assert_eq!(terminal.take_title().as_deref(), Some("work;archive"));
 }
 
 #[test]

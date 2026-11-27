@@ -174,6 +174,8 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
             if let Outcome::Exit(code) = shell.run_precmd(streams)? {
                 return Ok(code);
             }
+            #[cfg(windows)]
+            console::set_directory_title(shell.cwd());
         }
         let mut line = String::new();
         let read = input.read_line(shell, streams, &pending, &mut line);

@@ -1288,7 +1288,7 @@ fn simultaneous_first_sessions_share_a_complete_starter_profile() {
                     0
                 );
                 let prompt = shell.render_prompt(false, &mut streams).unwrap();
-                assert!(prompt.visible.ends_with("   ~  "), "{}", prompt.visible);
+                assert!(prompt.visible.ends_with("  ~  "), "{}", prompt.visible);
                 assert!(prompt.display.contains("\x1b[48;2;59;133;134m"));
             });
         }
@@ -1327,7 +1327,7 @@ fn powerline_prompt_tracks_worktree_branch_and_quotes_names_as_text() {
     assert!(
         prompt
             .visible
-            .ends_with("  ~/project%F{red}/src    feature/%n  "),
+            .ends_with(" ~/project%F{red}/src    feature/%n  "),
         "{}",
         prompt.visible
     );

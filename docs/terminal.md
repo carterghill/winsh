@@ -94,7 +94,11 @@ GDI renders Cascadia Mono by default with a Windows fallback and per-monitor
 DPI scaling. For private-use icon characters, the terminal loads
 Symbols Nerd Font Mono 3.4.0 from its executable. Icons retain their natural
 proportions. The terminal aligns the visible strokes of each icon with the
-surrounding text. `ls --icons` prints two spaces after each icon so the icon
+surrounding text. Icons with blank padding on both sides in a colored prompt
+segment draw slightly larger. The Windows badge sits slightly below the
+geometric center, and the open folder sits closer to the path. Directory and
+Git labels share a baseline that centers capital letters within each segment.
+`ls --icons` prints two spaces after each icon so the icon
 can extend into the first and leave a full cell clear before the filename.
 An icon next to text fits within its own cell. This works for `ls` and
 other programs that emit Nerd Font icons. In Windows Terminal, select a Nerd

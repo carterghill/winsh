@@ -624,6 +624,7 @@ impl State {
             let terminal = self.current().terminal.lock().unwrap();
             let screen = terminal.screen();
             let (rows, columns) = screen.size();
+            let mut segment_background = None;
             for row in 0..rows {
                 let mut cells = 0..columns;
                 while let Some(column) = cells.next() {
@@ -634,10 +635,15 @@ impl State {
                         continue;
                     }
                     let (foreground, background) = cell_colors(cell);
+                    if segment_background != Some(background) {
+                        segment_background = None;
+                    }
                     let contents = cell.contents();
                     let x = padding + i32::from(column) * self.fonts.width;
                     let y = origin_y + i32::from(row) * self.fonts.height;
                     if contents == "\u{e0b0}" {
+                        segment_background =
+                            (background != DEFAULT_BACKGROUND).then_some(background);
                         let rect = RECT {
                             left: x,
                             top: y,
@@ -648,19 +654,24 @@ impl State {
                         continue;
                     }
                     let symbol = self.symbols.glyph(contents);
-                    let mut wide = cell.is_wide();
-                    if symbol.is_some()
-                        && !wide
-                        && can_share_symbol_space(screen.cell(row, column + 1), background)
-                    {
+                    let spaced = symbol.is_some()
+                        && !cell.is_wide()
+                        && can_share_symbol_space(screen.cell(row, column + 1), background);
+                    if spaced {
                         // Paint the blank's background together with the icon so it
                         // cannot erase the right edge on the next iteration.
                         cells.next();
-                        wide = true;
                     }
+                    let wide = spaced || cell.is_wide();
+                    // A colored segment with padding on both sides has room to
+                    // center the icon on its own column, as in a Powerline prompt.
+                    let padded = spaced
+                        && background != DEFAULT_BACKGROUND
+                        && column > 0
+                        && can_share_symbol_space(screen.cell(row, column - 1), background);
                     let width = self.fonts.width * if wide { 2 } else { 1 };
                     let rect = RECT {
-                        left: x,
+                        left: if padded { x - self.fonts.width / 2 } else { x },
                         top: y,
                         right: x + width,
                         bottom: y + self.fonts.height,
@@ -674,24 +685,43 @@ impl State {
                     // split supplementary-plane icons such as the Downloads folder.
                     let units;
                     let (font, text, flags, dx, dy) = if let Some(ref glyph) = symbol {
-                        let size = self.fonts.symbol(wide);
-                        // In a padded icon field, align its advance to the end of
-                        // the field. The following space is the visible name gap.
-                        let dx = if wide
+                        let size = if padded {
+                            &self.fonts.padded_symbol
+                        } else {
+                            self.fonts.symbol(wide)
+                        };
+                        let (mut dx, mut dy) = size.offset(*glyph);
+                        if padded && contents == "\u{f17a}" {
+                            // Lower the Windows mark by an eighth of the spare
+                            // height around its square em, rounded to a pixel.
+                            dy += ((self.fonts.height - size.advance).max(0) + 4) / 8;
+                        } else if padded
+                            && segment_background.is_some()
+                            && contents == "\u{f07c}"
+                            && screen.cell(row, column + 2).is_some_and(|next| {
+                                cell_colors(next).1 == background
+                                    && self.symbols.glyph(next.contents()).is_none()
+                            })
+                        {
+                            // Bring the folder toward its path. Adjacent icons share the blank.
+                            dx += self.fonts.width / 4;
+                        }
+                        // In listings, leave a full blank cell before the name.
+                        if !padded
+                            && wide
                             && can_share_symbol_space(
                                 screen.cell(row, column.saturating_add(2)),
                                 background,
-                            ) {
-                            (width - size.advance).max(0)
-                        } else {
-                            0
-                        };
+                            )
+                        {
+                            dx = (width - size.advance).max(0);
+                        }
                         (
                             size.handle(),
                             std::slice::from_ref(glyph),
                             ETO_GLYPH_INDEX,
                             dx,
-                            size.y(*glyph),
+                            dy,
                         )
                     } else {
                         units = if contents.is_empty() {
@@ -699,7 +729,12 @@ impl State {
                         } else {
                             OsStr::new(contents).encode_wide().collect()
                         };
-                        (self.fonts.text(index), units.as_slice(), 0, 0, 0)
+                        let dy = if segment_background.is_some() {
+                            self.fonts.segment_text_y
+                        } else {
+                            0
+                        };
+                        (self.fonts.text(index), units.as_slice(), 0, 0, dy)
                     };
                     SelectObject(memory, font);
                     ExtTextOutW(
@@ -712,6 +747,9 @@ impl State {
                         text.len() as u32,
                         ptr::null(),
                     );
+                }
+                if !screen.row_wrapped(row) {
+                    segment_background = None;
                 }
             }
             if self.focused
@@ -1359,6 +1397,101 @@ mod tests {
         state.send(b"exit 37\r".to_vec());
         wait(&mut state, |s| s.tabs.is_empty());
         assert_eq!(state.status, 37);
+    }
+
+    #[test]
+    fn prompt_icon_spacing_and_label_baselines() {
+        let program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        let mut state = State::new(&program, &["/d".into(), "/q".into()], 96, None).unwrap();
+        let mut terminal = Terminal::new(1, 22);
+        terminal.process(
+            concat!(
+                "\x1b[47;30m \u{f17a} ",
+                "\x1b[46m\u{e0b0} \u{f07c} ~H ",
+                "\x1b[42m\u{e0b0} \u{f113} \u{e0a0} m\x1b[1mH\x1b[22mg",
+                "\x1b[49m\u{e0b0}\x1b[0mH",
+            )
+            .as_bytes(),
+        );
+        state.current_mut().terminal = Arc::new(Mutex::new(terminal));
+        for dpi in [96, 120, 144, 192] {
+            state.dpi = dpi;
+            state.fonts = Fonts::new(dpi, &state.font_settings).unwrap();
+            let w = state.fonts.width;
+            let h = state.fonts.height;
+            let x = px(dpi, PADDING);
+            let y = state.layout.height + x;
+            // SAFETY: select the bitmap into a memory DC only for the duration of the render.
+            unsafe {
+                let screen = GetDC(ptr::null_mut());
+                let dc = CreateCompatibleDC(screen);
+                let bmp = CreateCompatibleBitmap(screen, x + 22 * w, y + h);
+                ReleaseDC(ptr::null_mut(), screen);
+                assert!(!dc.is_null() && !bmp.is_null());
+                let previous = SelectObject(dc, bmp);
+                state.paint_terminal(dc);
+                let bounds = |start: i32, end: i32| {
+                    let bg = GetPixel(dc, x + start, y);
+                    let (mut left, mut top, mut right, mut bottom) = (end, h, start, 0);
+                    for dy in 0..h {
+                        for dx in start..end {
+                            if GetPixel(dc, x + dx, y + dy) != bg {
+                                left = left.min(dx);
+                                right = right.max(dx + 1);
+                                top = top.min(dy);
+                                bottom = bottom.max(dy + 1);
+                            }
+                        }
+                    }
+                    assert!(
+                        left < right && top < bottom,
+                        "missing ink at {start}..{end}"
+                    );
+                    (left, top, right, bottom)
+                };
+                for col in [1, 12, 14] {
+                    let center = col * w + w / 2;
+                    let (left, top, right, bottom) = bounds(center - w, center + w);
+                    // Allow one pixel for rasterization and rounding to the grid.
+                    assert!(
+                        (left + right - (2 * col + 1) * w).abs() <= 2,
+                        "column {col} at {dpi} DPI"
+                    );
+                    if col == 1 {
+                        assert!(right - left > w + w / 2, "OS badge should use its padding");
+                        assert!(
+                            (h..=h + 3).contains(&(top + bottom)),
+                            "Windows logo at {dpi} DPI"
+                        );
+                    } else {
+                        assert!((top + bottom - h).abs() <= 2, "column {col} at {dpi} DPI");
+                    }
+                }
+                let (_, _, folder_right, _) = bounds(4 * w, 7 * w);
+                let (tilde_left, _, _, _) = bounds(7 * w, 8 * w);
+                assert!(
+                    (1..=(w + 1) / 2).contains(&(tilde_left - folder_right)),
+                    "folder gap at {dpi} DPI"
+                );
+                let (_, cap_top, _, cap_bottom) = bounds(8 * w, 9 * w);
+                let (_, bold_top, _, bold_bottom) = bounds(17 * w, 18 * w);
+                let (_, _, _, descender) = bounds(18 * w, 19 * w);
+                let (_, normal_top, _, _) = bounds(20 * w, 21 * w);
+                assert!(
+                    (cap_top + cap_bottom - h).abs() <= 2,
+                    "path label at {dpi} DPI"
+                );
+                assert!(
+                    (bold_top + bold_bottom - h).abs() <= 2,
+                    "bold label at {dpi} DPI"
+                );
+                assert!(cap_bottom < descender && descender < h);
+                assert_eq!(cap_top - normal_top, state.fonts.segment_text_y);
+                SelectObject(dc, previous);
+                DeleteObject(bmp);
+                DeleteDC(dc);
+            }
+        }
     }
 
     #[test]

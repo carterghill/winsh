@@ -57,8 +57,10 @@ pub(super) struct Fonts {
     icon: Font,
     compact_symbol: SymbolSize,
     spaced_symbol: SymbolSize,
+    pub(super) padded_symbol: SymbolSize,
     pub(super) width: i32,
     pub(super) height: i32,
+    pub(super) segment_text_y: i32,
     pub(super) cursor_y: std::ops::Range<i32>,
 }
 
@@ -75,20 +77,29 @@ impl Fonts {
         let height = (metrics.tmHeight + metrics.tmExternalLeading).max(1);
         // Sample both cap height and x-height. Weighting the two letters by their
         // ink puts the icon alongside the visible body of a mixed-case filename.
-        let text_center = with_font_dc(text[0].0, |dc| {
+        let (text_center, segment_text_y) = with_font_dc(text[0].0, |dc| {
+            let cap = glyph_ink(dc, u32::from('H'), 0);
+            // Place the cap line and baseline at equal distances from the
+            // segment edges. Lowercase and bold text share that baseline.
+            let segment_text_y = cap.as_ref().map_or(0, |ink| {
+                let cap_midpoint = (metrics.tmAscent + ink.top) as f32 + ink.height as f32 / 2.0;
+                (height as f32 / 2.0 - cap_midpoint).round() as i32
+            });
             let mut weight = 0.0;
             let mut moment = 0.0;
-            for ch in ['H', 'x'] {
-                if let Some(ink) = glyph_ink(dc, u32::from(ch), 0) {
-                    weight += ink.weight;
-                    moment += ink.center * ink.weight;
-                }
+            for ink in [cap, glyph_ink(dc, u32::from('x'), 0)]
+                .into_iter()
+                .flatten()
+            {
+                weight += ink.weight;
+                moment += ink.center * ink.weight;
             }
-            Ok(if weight > 0.0 {
+            let text_center = if weight > 0.0 {
                 metrics.tmAscent as f32 + moment / weight
             } else {
                 height as f32 / 2.0
-            })
+            };
+            Ok((text_center, segment_text_y))
         })?;
         // Use the font's em height, extending through the descenders.
         let bottom = metrics.tmHeight.clamp(1, height);
@@ -98,10 +109,20 @@ impl Fonts {
             text,
             label: create_font((13 * dpi as i32 + 48) / 96, 0, w!("Segoe UI"))?,
             icon: create_font((12 * dpi as i32 + 48) / 96, 0, w!("Segoe MDL2 Assets"))?,
-            compact_symbol: SymbolSize::new(em.min(width), height, text_center)?,
-            spaced_symbol: SymbolSize::new(em.min(width + width / 2), height, text_center)?,
+            compact_symbol: SymbolSize::new(em.min(width), height, Alignment::Text(text_center))?,
+            spaced_symbol: SymbolSize::new(
+                em.min(width + width / 2),
+                height,
+                Alignment::Text(text_center),
+            )?,
+            padded_symbol: SymbolSize::new(
+                em.min((7 * width + 2) / 4),
+                height,
+                Alignment::Cell(width),
+            )?,
             width,
             height,
+            segment_text_y,
             cursor_y: metrics.tmInternalLeading.clamp(0, bottom - 1)..bottom,
         })
     }
@@ -127,18 +148,24 @@ impl Fonts {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Alignment {
+    Text(f32),
+    Cell(i32),
+}
+
 pub(super) struct SymbolSize {
     font: Font,
     pub(super) advance: i32,
     ascent: i32,
     cell_height: i32,
-    text_center: f32,
+    alignment: Alignment,
     fallback_y: i32,
-    offsets: RefCell<HashMap<u16, i32>>,
+    offsets: RefCell<HashMap<u16, (i32, i32)>>,
 }
 
 impl SymbolSize {
-    fn new(em: i32, cell_height: i32, text_center: f32) -> io::Result<Self> {
+    fn new(em: i32, cell_height: i32, alignment: Alignment) -> io::Result<Self> {
         let font = create_font(em, 0, w!("Symbols Nerd Font Mono"))?;
         let metrics = font_metrics(font.0)?;
         Ok(Self {
@@ -146,7 +173,7 @@ impl SymbolSize {
             advance: metrics.tmAveCharWidth,
             ascent: metrics.tmAscent,
             cell_height,
-            text_center,
+            alignment,
             fallback_y: (cell_height - metrics.tmHeight) / 2,
             offsets: RefCell::default(),
         })
@@ -156,22 +183,34 @@ impl SymbolSize {
         self.font.0
     }
 
-    pub(super) fn y(&self, glyph: u16) -> i32 {
+    pub(super) fn offset(&self, glyph: u16) -> (i32, i32) {
         *self.offsets.borrow_mut().entry(glyph).or_insert_with(|| {
             let ink = with_font_dc(self.font.0, |dc| {
                 Ok(glyph_ink(dc, u32::from(glyph), GGO_GLYPH_INDEX))
             });
             let Ok(Some(ink)) = ink else {
-                return self.fallback_y;
+                let x = match self.alignment {
+                    Alignment::Text(_) => 0,
+                    Alignment::Cell(width) => (width - self.advance) / 2,
+                };
+                return (x, self.fallback_y);
             };
-            let baseline = (self.text_center - ink.center).round() as i32;
-            let top = (baseline + ink.top).clamp(0, (self.cell_height - ink.height).max(0));
-            top - ink.top - self.ascent
+            let (x, top) = match self.alignment {
+                Alignment::Text(center) => (0, (center - ink.center).round() as i32 + ink.top),
+                Alignment::Cell(width) => (
+                    (width - ink.width).div_euclid(2) - ink.left,
+                    (self.cell_height - ink.height) / 2,
+                ),
+            };
+            let top = top.clamp(0, (self.cell_height - ink.height).max(0));
+            (x, top - ink.top - self.ascent)
         })
     }
 }
 
 struct Ink {
+    left: i32,
+    width: i32,
     // Vertical coordinates are relative to the font baseline, increasing downwards.
     top: i32,
     height: i32,
@@ -221,6 +260,8 @@ fn glyph_ink(dc: HDC, glyph: u32, flags: u32) -> Option<Ink> {
     }
     let top = -bounds.gmptGlyphOrigin.y;
     (total > 0.0).then(|| Ink {
+        left: bounds.gmptGlyphOrigin.x,
+        width: bounds.gmBlackBoxX as i32,
         top,
         height: bounds.gmBlackBoxY as i32,
         center: top as f32 + moment / total,
@@ -345,11 +386,15 @@ mod font_tests {
                     &matrix,
                 );
                 assert!(bytes > 0 && bytes != u32::MAX, "no bitmap for {sample}");
-                let y = size.y(glyph);
+                let (x, y) = size.offset(glyph);
+                assert_eq!(x, 0);
                 let ink = glyph_ink(dc, u32::from(glyph), GGO_GLYPH_INDEX).unwrap();
                 let painted_center = (y + metrics.tmAscent) as f32 + ink.center;
+                let Alignment::Text(text_center) = size.alignment else {
+                    panic!("expected a text-aligned icon");
+                };
                 assert!(
-                    (painted_center - size.text_center).abs() <= 0.51,
+                    (painted_center - text_center).abs() <= 0.51,
                     "{sample} is vertically off-center"
                 );
                 let top = y + metrics.tmAscent - bounds.gmptGlyphOrigin.y;

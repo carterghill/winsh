@@ -33,6 +33,10 @@ impl Terminal {
         self.parser.screen()
     }
 
+    pub fn win32_input_mode(&self) -> bool {
+        self.parser.callbacks().win32_input_mode
+    }
+
     pub fn resize(&mut self, rows: u16, columns: u16) {
         self.parser
             .screen_mut()
@@ -65,6 +69,7 @@ impl Terminal {
 struct Responses {
     bytes: Vec<u8>,
     title: Option<String>,
+    win32_input_mode: bool,
 }
 
 impl Callbacks for Responses {
@@ -102,6 +107,10 @@ impl Callbacks for Responses {
         ch: char,
     ) {
         if i2.is_some() {
+            return;
+        }
+        if i1 == Some(b'?') && matches!(ch, 'h' | 'l') && params.contains(&&[9001][..]) {
+            self.win32_input_mode = ch == 'h';
             return;
         }
         let parameter = params.first().and_then(|p| p.first()).copied().unwrap_or(0);

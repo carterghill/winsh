@@ -334,12 +334,19 @@ fn winsh_interactive_smoke() {
     // before sending Ctrl+C so this exercises an active multiline read.
     harness.session.write(b"pending-input".to_vec()).unwrap();
     harness.wait_for("> pending-input");
-    harness.session.write(vec![3]).unwrap();
+    // A physical Ctrl+C in native keyboard mode must still cancel the editor.
+    harness
+        .session
+        .write(b"\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_".to_vec())
+        .unwrap();
     wait_for_prompt(&harness);
     harness.enter(r#"trap 'echo trapped-"interrupt"' INT"#);
     harness.enter(r#"powershell.exe -NoLogo -NoProfile -Command 'Write-Output ("foreground-" + "ready"); Start-Sleep 60'"#);
     harness.wait_for("foreground-ready");
-    harness.session.write(vec![3]).unwrap();
+    harness
+        .session
+        .write(b"\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_".to_vec())
+        .unwrap();
     harness.wait_for("trapped-interrupt");
     wait_for_prompt(&harness);
     harness.enter("trap - INT");
@@ -467,6 +474,21 @@ fn winsh_controls_foreground_and_background_jobs() {
     h.session.write(vec![4]).unwrap();
     h.wait_for("\nreader-exited-0");
     h.enter("exit 0");
+    h.wait_for_exit(0);
+}
+
+#[test]
+#[ignore = "requires cargo build --workspace in the same target directory"]
+fn winsh_shift_enter_edits_a_second_line_before_execution() {
+    let h = Harness::shell(Path::new(""));
+    h.session
+        .write(b"echo first-part\x1b[13;28;13;1;16;1_echo second-part".to_vec())
+        .unwrap();
+    h.wait_for("echo second-part");
+    assert!(!h.contents().contains("\nfirst-part"));
+    h.session.write(vec![b'\r']).unwrap();
+    h.wait_for("\nfirst-part\nsecond-part");
+    h.enter("exit");
     h.wait_for_exit(0);
 }
 

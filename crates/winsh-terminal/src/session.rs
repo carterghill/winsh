@@ -194,20 +194,25 @@ impl Session {
     pub fn write(&self, bytes: Vec<u8>) -> io::Result<()> {
         // Ctrl+Z is a console input character on Windows. A foreground winsh
         // job advertises a stop event; all other hosted programs get normal input.
-        if bytes == [26] {
-            // SAFETY: NUL-terminated name; take ownership only on successful open.
-            let raw = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, self.stop_event.as_ptr()) };
-            if !raw.is_null() {
-                let event = unsafe { OwnedHandle::from_raw_handle(raw) };
-                if unsafe { SetEvent(event.as_raw_handle()) } == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                return Ok(());
-            }
+        if bytes == [26] && self.stop_foreground()? {
+            return Ok(());
         }
         self.input
             .send(bytes)
             .map_err(|_| io::ErrorKind::BrokenPipe.into())
+    }
+
+    pub(crate) fn stop_foreground(&self) -> io::Result<bool> {
+        // SAFETY: NUL-terminated name; take ownership only on successful open.
+        let raw = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, self.stop_event.as_ptr()) };
+        if raw.is_null() {
+            return Ok(false);
+        }
+        let event = unsafe { OwnedHandle::from_raw_handle(raw) };
+        if unsafe { SetEvent(event.as_raw_handle()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
     }
 
     pub fn resize(&self, rows: u16, columns: u16) {
@@ -463,7 +468,7 @@ fn terminal_environment(stop_event: &str) -> Vec<u16> {
                 && !name.eq_ignore_ascii_case("WINSH_TERMINAL_STOP_EVENT")
         })
         .collect();
-    vars.push(("TERM".into(), "vt100".into()));
+    vars.push(("TERM".into(), "xterm-256color".into()));
     vars.push(("WINSH_TERMINAL_STOP_EVENT".into(), stop_event.into()));
     vars.sort_by_cached_key(|(name, _)| name.to_string_lossy().to_uppercase());
     let mut block = Vec::new();

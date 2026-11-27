@@ -28,7 +28,8 @@ cargo build --workspace --release
 Keep `winsh-terminal.exe` and `winsh.exe` together. The launcher resolves the
 default shell beside its own executable, independently of the working directory.
 The shell inherits the launcher's working directory and environment, with
-`TERM=vt100` identifying the dedicated terminal to interactive programs.
+`TERM=xterm-256color` so programs such as Nano can look up the terminal's
+colors and keyboard sequences in their terminfo database.
 
 ## Automatic rebuilds
 
@@ -75,7 +76,9 @@ more tabs on either side. Drag the space beside the tabs to move the window.
 | Alt+Left / Alt+Right | Move one word left / right at the winsh prompt. |
 | Tab's × or Ctrl+Shift+W | Close that tab or the active tab, respectively. Closing the last tab closes the window. |
 | Text, Enter, Backspace | Console input and editing supplied by the hosted program. |
-| Arrow keys, Home/End, Insert/Delete, F1–F12 | Terminal key sequences, including application cursor mode and modifiers. |
+| Shift+Enter | Insert a newline at the winsh prompt or in the Codex composer. Plain Enter still submits. |
+| Ctrl+letter | Send the shortcut to the hosted program unless Winsh has a binding for it. In Codex, Ctrl+J inserts a newline. In Nano, Ctrl+X exits and prompts to save a modified buffer. |
+| Arrow keys, Home/End, Insert/Delete, F1–F12 | Forward the key and its modifiers to the hosted program. In VT mode, arrow keys also follow the application's cursor mode. |
 | Ctrl+C | Send an interrupt through ConPTY; winsh keeps the session open. |
 | Ctrl+Z | Stop a foreground winsh job. At the shell prompt, send Windows end-of-input. |
 | Ctrl+Shift+V or Shift+Insert | Paste Unicode clipboard text; bracketed paste when requested by the application. |
@@ -116,10 +119,16 @@ and drains output while releasing ConPTY to avoid pipe deadlocks.
 
 The dedicated terminal creates `%APPDATA%\winsh\keymap.json` beside
 `settings.json`. Each entry maps one key combination to an action. For
-example, change `"ctrl+right": "next_tab"` to `"ctrl+j": "next_tab"` and save.
-Ctrl+J will switch tabs immediately in open windows. Deleting a binding
+example, change `"ctrl+right": "next_tab"` to `"ctrl+shift+right": "next_tab"` and save.
+Ctrl+Shift+Right will switch tabs immediately in open windows. Deleting a binding
 returns that combination to normal terminal input. An invalid edit keeps the
 last working bindings active. [Default keymap and supported actions](../crates/winsh-terminal/assets/keymap.json)
+
+When ConPTY requests native keyboard input, Winsh forwards the virtual key,
+scan code, Unicode character, modifiers, press or release, and repeat count.
+This lets applications distinguish Ctrl+J from Enter and Ctrl+I from Tab.
+Older ConPTY versions use terminal byte sequences, where some key combinations
+share a representation. [Microsoft's ConPTY keyboard protocol](https://github.com/microsoft/terminal/blob/main/doc/specs/%234999%20-%20Improved%20keyboard%20handling%20in%20Conpty.md)
 
 Key names are case-insensitive. Combine `ctrl` (or `control`), `alt`, and
 `shift` in any order before the key. Supported keys are letters A–Z, digits
@@ -176,8 +185,8 @@ cargo test --locked --workspace --all-targets
 Tests cover cell rendering state, escape/UTF-8 fragmentation, colors, alternate
 screens, scrollback, queries, input encoding, actual ConPTY input/output,
 resizing as observed by a console child, startup failure, and descendant cleanup.
-Two ignored test entries are subprocess fixtures used by those integration
-tests, not additional manual checks.
+The keyboard, console, and descendant subprocess fixtures run as part of
+those tests.
 
 The opt-in shell tests cover suspending and resuming jobs, foreground input,
 Ctrl+C isolation, Tab completion, persistent command recall across terminal restarts,

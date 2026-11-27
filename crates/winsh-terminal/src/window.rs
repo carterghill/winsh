@@ -41,10 +41,12 @@ use crate::{
 };
 
 mod fonts;
+mod keyboard;
 mod keymap;
 mod settings;
 mod titlebar;
 use fonts::{Fonts, Symbols};
+use keyboard::KeyboardState;
 use keymap::{Action, Keymap};
 use settings::{ConfigFile, FontSettings};
 use titlebar::{Control, Layout, px};
@@ -125,6 +127,7 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
         UpdateWindow(hwnd);
     }
     let mut message = MSG::default();
+    let mut shortcut_keys = [false; 256];
     loop {
         // SAFETY: valid output MSG, no filtering, message dispatch on owner thread.
         let result = unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) };
@@ -140,20 +143,44 @@ pub fn run(program: &Path, arguments: &[OsString]) -> io::Result<i32> {
         }
         // SAFETY: a message obtained from GetMessageW.
         unsafe {
-            let key_down =
-                message.hwnd == hwnd && matches!(message.message, WM_KEYDOWN | WM_SYSKEYDOWN);
-            let code = message.wParam as u16;
-            // Consume shortcuts before TranslateMessage can queue a second
-            // character, possibly for a tab the shortcut just activated.
-            if key_down && state.shortcut(code, modifiers(), message.lParam & (1 << 30) != 0, hwnd)
+            if message.hwnd == hwnd
+                && matches!(
+                    message.message,
+                    WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
+                )
+                && message.wParam < shortcut_keys.len()
             {
-                refresh(hwnd, &mut *state, true);
-                continue;
+                let code = message.wParam as u16;
+                let down = matches!(message.message, WM_KEYDOWN | WM_SYSKEYDOWN);
+                let keyboard = KeyboardState::read();
+                let shortcut = &mut shortcut_keys[message.wParam];
+                if down {
+                    *shortcut = state.shortcut(
+                        code,
+                        keyboard.modifiers(),
+                        message.lParam & (1 << 30) != 0,
+                        hwnd,
+                    );
+                    if *shortcut {
+                        refresh(hwnd, &mut *state, true);
+                        continue;
+                    }
+                } else if std::mem::take(shortcut) {
+                    continue;
+                }
+                // Let Windows deliver IME/injected text and handle system
+                // menu/close commands through the usual message translation.
+                let system_key = matches!(message.message, WM_SYSKEYDOWN | WM_SYSKEYUP)
+                    && matches!(code, VK_F4 | VK_SPACE);
+                if !system_key
+                    && !matches!(code, VK_PROCESSKEY | VK_PACKET)
+                    && state.terminal_key(code, message.lParam, down, &keyboard)
+                {
+                    // Translation would also post a WM_CHAR for this key.
+                    continue;
+                }
             }
-            // Unbound Tab is encoded by key_down, including Shift+Tab.
-            if !(key_down && code == VK_TAB) {
-                TranslateMessage(&message);
-            }
+            TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
@@ -393,13 +420,21 @@ impl State {
                 } else {
                     Key::Right
                 };
-                self.send_key(
+                let application_cursor = self
+                    .current()
+                    .terminal
+                    .lock()
+                    .unwrap()
+                    .screen()
+                    .application_cursor();
+                self.send(input::key(
                     key,
                     Modifiers {
                         alt: true,
                         ..Modifiers::default()
                     },
-                );
+                    application_cursor,
+                ));
             }
             Action::Paste => {
                 if let Some(text) = clipboard_text(hwnd) {
@@ -433,35 +468,42 @@ impl State {
         true
     }
 
-    fn key_down(&mut self, code: u16, modifiers: Modifiers) -> bool {
-        let key = match code {
-            VK_UP => Key::Up,
-            VK_DOWN => Key::Down,
-            VK_LEFT => Key::Left,
-            VK_RIGHT => Key::Right,
-            VK_HOME => Key::Home,
-            VK_END => Key::End,
-            VK_INSERT => Key::Insert,
-            VK_DELETE => Key::Delete,
-            VK_PRIOR => Key::PageUp,
-            VK_NEXT => Key::PageDown,
-            VK_TAB => Key::Tab,
-            VK_F1..=VK_F12 => Key::Function((code - VK_F1 + 1) as u8),
-            _ => return false,
+    fn terminal_key(
+        &mut self,
+        code: u16,
+        lparam: isize,
+        down: bool,
+        keyboard: &KeyboardState,
+    ) -> bool {
+        let modifiers = keyboard.modifiers();
+        if down
+            && code == VK_Z
+            && modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.current().session.stop_foreground().unwrap_or(false)
+        {
+            return true;
+        }
+        let terminal = self.current().terminal.lock().unwrap();
+        let bytes = if terminal.win32_input_mode() {
+            keyboard.encode(code, lparam, down)
+        } else if down
+            && let Some(bytes) =
+                keyboard::vt_key(code, modifiers, terminal.screen().application_cursor())
+        {
+            bytes.repeat(usize::from((lparam as u16).max(1)))
+        } else {
+            return false;
         };
-        self.send_key(key, modifiers);
+        drop(terminal);
+        if down && !matches!(code, VK_SHIFT | VK_CONTROL | VK_MENU) {
+            self.send(bytes);
+        } else {
+            // Modifier and release events must not move the scrollback viewport.
+            let _ = self.current().session.write(bytes);
+        }
         true
-    }
-
-    fn send_key(&mut self, key: Key, modifiers: Modifiers) {
-        let application = self
-            .current()
-            .terminal
-            .lock()
-            .unwrap()
-            .screen()
-            .application_cursor();
-        self.send(input::key(key, modifiers, application));
     }
 
     fn tick(&mut self) -> bool {
@@ -932,17 +974,6 @@ unsafe extern "system" fn window_proc(
                 refresh(hwnd, state, redraw);
                 0
             }
-            WM_SYSKEYDOWN if wparam == usize::from(VK_F4) => {
-                DefWindowProcW(hwnd, message, wparam, lparam)
-            }
-            WM_KEYDOWN | WM_SYSKEYDOWN if !state.is_null() => {
-                let handled = (*state).key_down(wparam as u16, modifiers());
-                if handled {
-                    0
-                } else {
-                    DefWindowProcW(hwnd, message, wparam, lparam)
-                }
-            }
             WM_CHAR | WM_SYSCHAR if !state.is_null() => {
                 let unit = wparam as u16;
                 if message == WM_SYSCHAR && unit == 32 {
@@ -1040,17 +1071,6 @@ unsafe extern "system" fn window_proc(
                 0
             }
             _ => DefWindowProcW(hwnd, message, wparam, lparam),
-        }
-    }
-}
-
-fn modifiers() -> Modifiers {
-    // SAFETY: querying the thread's keyboard state needs no pointers.
-    unsafe {
-        Modifiers {
-            shift: GetKeyState(VK_SHIFT as i32) < 0,
-            alt: GetKeyState(VK_MENU as i32) < 0,
-            control: GetKeyState(VK_CONTROL as i32) < 0,
         }
     }
 }
@@ -1216,6 +1236,98 @@ fn color(color: vt100::Color, default: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_child_distinguishes_control_letters_and_modified_enter() {
+        let program = std::env::current_exe().unwrap();
+        let args = [
+            "--ignored",
+            "--exact",
+            "window::tests::read_console_keys",
+            "--nocapture",
+        ]
+        .map(OsString::from);
+        let mut state = State::new(&program, &args, 96, None).unwrap();
+        let terminal = Arc::clone(&state.current().terminal);
+        let wait_for = |expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let contents = terminal.lock().unwrap().screen().contents();
+                if contents.contains(expected) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "waiting for {expected:?}: {contents}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait_for("reading keys");
+        assert!(terminal.lock().unwrap().win32_input_mode());
+        for (code, scan, modifier) in [
+            (VK_J, 0x24, VK_CONTROL),
+            (VK_RETURN, 0x1c, VK_SHIFT),
+            (VK_X, 0x2d, VK_CONTROL),
+            (VK_H, 0x23, VK_CONTROL),
+            (VK_I, 0x17, VK_CONTROL),
+            (VK_RETURN, 0x1c, 0),
+        ] {
+            let mut keys = KeyboardState([0; 256]);
+            if modifier != 0 {
+                keys.0[usize::from(modifier)] = 0x80;
+            }
+            if modifier == VK_CONTROL {
+                keys.0[usize::from(VK_LCONTROL)] = 0x80;
+            }
+            assert!(state.terminal_key(code, (scan << 16) | 1, true, &keys));
+            assert!(state.terminal_key(code, (scan << 16) | 1, false, &keys));
+        }
+        wait_for("keys received");
+    }
+
+    #[test]
+    #[ignore = "native keyboard input fixture, launched inside ConPTY"]
+    fn read_console_keys() {
+        use windows_sys::Win32::System::Console::*;
+        // SAFETY: this child is attached to the test's pseudoconsole. The buffer
+        // holds one input record and the union is read only for keyboard events.
+        unsafe {
+            let handle = GetStdHandle(STD_INPUT_HANDLE);
+            assert_ne!(SetConsoleMode(handle, 0), 0);
+            println!("reading keys");
+            for (code, unit, flags) in [
+                (VK_J, 10, LEFT_CTRL_PRESSED),
+                (VK_RETURN, 13, SHIFT_PRESSED),
+                (VK_X, 24, LEFT_CTRL_PRESSED),
+                (VK_H, 8, LEFT_CTRL_PRESSED),
+                (VK_I, 9, LEFT_CTRL_PRESSED),
+                (VK_RETURN, 13, 0),
+            ] {
+                for down in [true, false] {
+                    let mut record = INPUT_RECORD::default();
+                    let mut count = 0;
+                    loop {
+                        assert_ne!(ReadConsoleInputW(handle, &mut record, 1, &mut count), 0);
+                        if count == 1 && u32::from(record.EventType) == KEY_EVENT {
+                            break;
+                        }
+                    }
+                    let key = record.Event.KeyEvent;
+                    assert_eq!(
+                        (
+                            key.wVirtualKeyCode,
+                            key.uChar.UnicodeChar,
+                            key.dwControlKeyState,
+                            key.bKeyDown != 0
+                        ),
+                        (code, unit, flags, down)
+                    );
+                }
+            }
+            println!("keys received");
+        }
+    }
 
     #[test]
     fn keymap_drives_tab_switching_and_reloads_in_open_tabs() {

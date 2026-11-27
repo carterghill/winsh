@@ -182,6 +182,10 @@ impl CommandEditor {
         let mut lines = LineEditor::with_config(config).map_err(io::Error::other)?;
         #[cfg(windows)]
         let eof = {
+            lines.bind_sequence(
+                rustyline::KeyEvent(rustyline::KeyCode::Enter, rustyline::Modifiers::SHIFT),
+                rustyline::Cmd::Newline,
+            );
             let eof = ConsoleEof::default();
             lines.bind_sequence(
                 rustyline::KeyEvent::ctrl('Z'),

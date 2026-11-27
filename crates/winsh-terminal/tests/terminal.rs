@@ -63,6 +63,21 @@ fn terminal_answers_queries_and_sanitizes_window_titles() {
 }
 
 #[test]
+fn conpty_selects_native_keyboard_input_per_terminal() {
+    let mut terminal = Terminal::new(5, 20);
+    terminal.process(b"\x1b[?1;90");
+    assert!(!terminal.win32_input_mode());
+    terminal.process(b"01h");
+    assert!(terminal.win32_input_mode());
+    assert!(terminal.screen().application_cursor());
+    assert!(!Terminal::new(5, 20).win32_input_mode());
+    terminal.process(b"\x1b[?1l");
+    assert!(terminal.win32_input_mode());
+    terminal.process(b"\x1b[?9001l");
+    assert!(!terminal.win32_input_mode());
+}
+
+#[test]
 fn keyboard_modes_modifiers_unicode_and_paste_are_encoded_for_the_child() {
     assert_eq!(input::key(Key::Up, Modifiers::default(), false), b"\x1b[A");
     assert_eq!(input::key(Key::Up, Modifiers::default(), true), b"\x1bOA");

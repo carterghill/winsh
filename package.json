@@ -1,0 +1,7 @@
+{
+  "name": "winsh",
+  "private": true,
+  "scripts": {
+    "build": "compile.cmd && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-installer.ps1"
+  }
+}

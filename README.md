@@ -180,6 +180,18 @@ Build both Windows release executables with the [compile script](compile.cmd).
 The release executables are `target/release/winsh.exe` and
 `target/release/winsh-terminal.exe` on Windows. Keep them together.
 
+To build both executables and package the Windows installer, install Node.js
+with npm and Inno Setup 6 alongside the Rust build tools. From the repo root:
+
+~~~powershell
+winget install --exact --id JRSoftware.InnoSetup --scope user
+npm run build
+~~~
+
+The build writes `dist/winsh-<version>-setup.exe` using the Cargo workspace
+version. The installer places both executables in
+`%LOCALAPPDATA%\Programs\winsh` by default and adds a winsh Start menu shortcut.
+
 Before committing changes:
 
 ~~~powershell

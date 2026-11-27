@@ -159,7 +159,7 @@ fn entries(
 fn is_command(path: &Path) -> bool {
     #[cfg(windows)]
     if !path.extension().is_some_and(|ext| {
-        ["exe", "com", "sh"]
+        ["exe", "com", "cmd", "bat", "sh"]
             .iter()
             .any(|name| ext.eq_ignore_ascii_case(name))
     }) {

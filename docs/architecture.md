@@ -120,8 +120,8 @@ streams from bypassing the pseudoconsole.
   distinguish literal text from syntax, even within a single word.
 - Keep cwd and environment in explicit shell state. Pass them to child
   processes; never mutate the host process's cwd or environment in the engine.
-- Use Rust's process APIs with individual native arguments. Batch files require
-  an explicitly invoked interpreter until there is a tested batch policy.
+- Use Rust's process APIs with individual arguments, including for Windows
+  batch launchers handled by the standard library.
 - Use `PathBuf` and `OsString` at OS boundaries. Keep Bash escaping in the
   parser; document Windows syntax extensions deliberately.
 - Give built-ins explicit state and I/O. Pass handles to children so large or

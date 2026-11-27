@@ -121,18 +121,7 @@ pub(crate) fn spawn(
         let status = child.run(&source, &mut streams)?.status();
         return Ok(Spawned::Complete(child.finish(status, &mut streams)?));
     }
-    // Rust can implicitly invoke cmd.exe for batch files. Defer that separate
-    // argument language until we implement and test an explicit batch policy.
-    if cfg!(windows)
-        && executable.extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        })
-    {
-        io.err(format_args!(
-            "winsh: batch files are not supported yet; invoke their interpreter explicitly\n"
-        ))?;
-        return Ok(Spawned::Failed(126));
-    }
+    // For Windows batch launchers, let std handle cmd.exe argument escaping.
     let mut child = Command::new(executable);
     child
         .args(&arguments[1..])
@@ -242,14 +231,21 @@ fn candidate(path: &Path) -> io::Result<PathBuf> {
         if path.extension().is_some() && path.is_file() {
             return Ok(path.to_owned());
         }
-        // Append rather than replace: dotted directories and command names
-        // retain their spelling. PATHEXT interpreter dispatch is deferred.
-        let mut executable = path.as_os_str().to_os_string();
-        executable.push(".exe");
-        match executable_file(Path::new(&executable)) {
-            Ok(()) => return Ok(executable.into()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        // Prefer Windows launchers over the extensionless Unix shim often
+        // installed alongside them. Preserve dotted names such as my.tool.exe.
+        let suffixes: &[&str] = if path.extension().is_none() {
+            &[".exe", ".cmd", ".bat"]
+        } else {
+            &[".exe"]
+        };
+        for suffix in suffixes {
+            let mut executable = path.as_os_str().to_os_string();
+            executable.push(suffix);
+            match executable_file(Path::new(&executable)) {
+                Ok(()) => return Ok(executable.into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     executable_file(path)?;

@@ -245,8 +245,11 @@ Programs inherit the session environment, directory, and standard I/O handles.
 Their stdout and stderr stay separate unless explicitly merged, and output is streamed without buffering
 the whole result in winsh. Native Windows exit codes retain all 32 bits.
 
-Implicit PATHEXT and file-association dispatch are not implemented. Direct
-`.bat`/`.cmd` execution is rejected; invoke `cmd.exe` explicitly when needed.
+On Windows an extensionless name tries `.exe`, `.cmd`, then `.bat` in each
+PATH directory before the exact name. This selects Windows launchers such as
+`npm.cmd` when a Unix shim named `npm` is installed beside them. Explicit
+`.cmd` and `.bat` paths also run. Custom PATHEXT and file associations are
+not used.
 `dir` and similar commands supplied by cmd are not native executables.
 The script built-ins are described below.
 

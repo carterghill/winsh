@@ -913,11 +913,23 @@ fn large_command_substitutions_and_compound_pipelines_do_not_deadlock() {
 
 #[cfg(windows)]
 #[test]
-fn batch_files_require_explicit_interpreter_invocation() {
+fn windows_batch_launchers_take_precedence_over_extensionless_shims() {
     let mut f = Fixture::new();
-    fs::write(f.root.0.join("script.cmd"), "@echo unexpected").unwrap();
-    assert_eq!(f.run("./script.cmd").status(), 126);
-    assert!(f.out().is_empty());
+    fs::write(f.root.0.join("script"), "#!/bin/sh\n").unwrap();
+    for suffix in ["cmd", "bat"] {
+        fs::write(
+            f.root.0.join(format!("script.{suffix}")),
+            "@echo off\r\necho %~1\r\nexit /b 23\r\n",
+        )
+        .unwrap();
+        assert_eq!(f.run("PATH=.; script 'two words'").status(), 23);
+        assert_eq!(f.run(&format!("./script.{suffix} explicit")).status(), 23);
+        fs::remove_file(f.root.0.join(format!("script.{suffix}"))).unwrap();
+    }
+    assert_eq!(
+        f.out().lines().collect::<Vec<_>>(),
+        ["two words", "explicit", "two words", "explicit"]
+    );
 }
 
 #[test]

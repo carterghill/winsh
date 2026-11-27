@@ -43,6 +43,7 @@ use crate::{
 mod fonts;
 mod keyboard;
 mod keymap;
+mod mouse;
 mod settings;
 mod titlebar;
 use fonts::{Fonts, Symbols};
@@ -247,6 +248,7 @@ struct State {
     dpi: u32,
     hover: Option<Control>,
     pressed: Option<Control>,
+    gesture: Option<mouse::Gesture>,
     title_dirty: bool,
     fonts: Fonts,
     font_settings: FontSettings,
@@ -294,6 +296,7 @@ impl State {
             dpi,
             hover: None,
             pressed: None,
+            gesture: None,
             title_dirty: true,
             fonts,
             font_settings,
@@ -333,6 +336,7 @@ impl State {
         );
         self.hover = None;
         self.pressed = None;
+        self.gesture = None;
     }
 
     fn select(&mut self, index: usize) {
@@ -449,7 +453,7 @@ impl State {
                 }
             }
             Action::Copy => {
-                let text = self.current().terminal.lock().unwrap().screen().contents();
+                let text = self.current().terminal.lock().unwrap().copy_contents();
                 copy_text(hwnd, &text);
             }
             Action::ScrollPageUp | Action::ScrollPageDown => {
@@ -777,6 +781,16 @@ impl State {
                 if !screen.row_wrapped(row) {
                     segment_background = None;
                 }
+                if let Some(cols) = terminal.selected_columns(row) {
+                    let y = origin_y + i32::from(row) * self.fonts.height;
+                    let rect = RECT {
+                        left: padding + i32::from(cols.start) * self.fonts.width,
+                        right: padding + i32::from(cols.end) * self.fonts.width,
+                        top: y,
+                        bottom: y + self.fonts.height,
+                    };
+                    InvertRect(memory, &rect);
+                }
             }
             if self.focused
                 && self.cursor_visible
@@ -962,6 +976,9 @@ unsafe extern "system" fn window_proc(
             }
             WM_SETFOCUS | WM_KILLFOCUS if !state.is_null() => {
                 (*state).focused = message == WM_SETFOCUS;
+                if message == WM_KILLFOCUS && GetCapture() == hwnd {
+                    ReleaseCapture();
+                }
                 InvalidateRect(hwnd, ptr::null(), 0);
                 0
             }
@@ -1022,6 +1039,10 @@ unsafe extern "system" fn window_proc(
                 if nc {
                     ScreenToClient(hwnd, &mut pt);
                 }
+                if (*state).gesture.is_some() {
+                    (*state).update_gesture(pt, false);
+                    return 0;
+                }
                 let hit = (*state).layout.hit(pt.x, pt.y);
                 if (*state).hover != hit {
                     (*state).hover = hit;
@@ -1050,6 +1071,8 @@ unsafe extern "system" fn window_proc(
                 if (*state).pressed.is_some() {
                     SetCapture(hwnd);
                     invalidate_bar(hwnd, &(*state).layout);
+                } else if (*state).begin_gesture(pt) {
+                    SetCapture(hwnd);
                 }
                 0
             }
@@ -1057,6 +1080,7 @@ unsafe extern "system" fn window_proc(
                 let pt = point(lparam);
                 let pressed = (*state).pressed.take();
                 let hit = (*state).layout.hit(pt.x, pt.y);
+                (*state).update_gesture(pt, true);
                 if GetCapture() == hwnd {
                     ReleaseCapture();
                 }
@@ -1067,6 +1091,7 @@ unsafe extern "system" fn window_proc(
             }
             WM_CAPTURECHANGED if !state.is_null() => {
                 (*state).pressed = None;
+                (*state).gesture = None;
                 invalidate_bar(hwnd, &(*state).layout);
                 0
             }
@@ -1583,6 +1608,16 @@ mod tests {
                 );
                 assert!(cap_bottom < descender && descender < h);
                 assert_eq!(cap_top - normal_top, state.fonts.segment_text_y);
+                // Selecting only an icon's shared padding cell must highlight
+                // that column even though GDI drew it together with the icon.
+                let pixel = |col| GetPixel(dc, x + col * w + w / 2, y + h / 2);
+                let (icon, padding) = (pixel(1), pixel(2));
+                let terminal = &state.current().terminal;
+                terminal.lock().unwrap().select((0, 2), (0, 3));
+                state.paint_terminal(dc);
+                assert_eq!(pixel(1), icon);
+                assert_eq!(pixel(2), padding ^ 0x00ff_ffff);
+                terminal.lock().unwrap().select((0, 0), (0, 0));
                 SelectObject(dc, previous);
                 DeleteObject(bmp);
                 DeleteDC(dc);

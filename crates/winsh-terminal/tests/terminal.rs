@@ -51,6 +51,29 @@ fn alternate_screen_scrollback_and_resize_keep_screen_state() {
 }
 
 #[test]
+fn selection_copies_visible_unicode_across_soft_wraps_and_hard_breaks() {
+    let mut t = Terminal::new(3, 5);
+    t.process("a界cde\u{301}f\r\nend".as_bytes());
+    t.select((2, 2), (0, 1));
+    assert_eq!(t.copy_contents(), "界cde\u{301}f\nen");
+    assert_eq!(t.selected_columns(0), Some(1..5));
+    assert_eq!(t.selected_columns(1), Some(0..5));
+    assert_eq!(t.selected_columns(2), Some(0..2));
+    t.process(b"!");
+    assert_eq!(t.copy_contents(), "界cde\u{301}f\nen");
+    t.process(b"\r\nnext");
+    assert_eq!(t.selected_columns(0), None);
+    t.scroll(1);
+    t.select((0, 1), (0, 3));
+    assert_eq!(t.copy_contents(), "界");
+    t.follow_output();
+    assert_eq!(t.copy_contents(), t.screen().contents());
+    t.select((0, 0), (1, 2));
+    t.process(b"\x1b[?1049h");
+    assert_eq!(t.selected_columns(0), None);
+}
+
+#[test]
 fn terminal_answers_queries_and_sanitizes_window_titles() {
     let mut terminal = Terminal::new(24, 80);
     let response = terminal.process(b"\x1b[3;7H\x1b[6n\x1b[5n\x1b[c\x1b[18t");

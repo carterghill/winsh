@@ -470,6 +470,14 @@ fn terminal_environment(stop_event: &str) -> Vec<u16> {
         .collect();
     vars.push(("TERM".into(), "xterm-256color".into()));
     vars.push(("WINSH_TERMINAL_STOP_EVENT".into(), stop_event.into()));
+    // Expose the composer's insertion point for click positioning in Claude
+    // Code's inline UI. Honor an explicit preference inherited from the user.
+    if !vars
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("CLAUDE_CODE_NATIVE_CURSOR"))
+    {
+        vars.push(("CLAUDE_CODE_NATIVE_CURSOR".into(), "1".into()));
+    }
     vars.sort_by_cached_key(|(name, _)| name.to_string_lossy().to_uppercase());
     let mut block = Vec::new();
     for (name, value) in vars {

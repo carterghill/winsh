@@ -82,7 +82,9 @@ more tabs on either side. Drag the space beside the tabs to move the window.
 | Ctrl+C | Send an interrupt through ConPTY; winsh keeps the session open. |
 | Ctrl+Z | Stop a foreground winsh job. At the shell prompt, send Windows end-of-input. |
 | Ctrl+Shift+V or Shift+Insert | Paste Unicode clipboard text; bracketed paste when requested by the application. |
-| Ctrl+Shift+C | Copy the visible screen as plain text. |
+| Left click | Position the cursor in the current input line. Programs that request mouse input receive the click and choose where to place the cursor. |
+| Left drag | Highlight text across one or more rows, including in scrollback. Dragging leaves the editing cursor in place. |
+| Ctrl+Shift+C | Copy the highlighted text. With no selection, copy the visible screen. |
 | Mouse wheel or Shift+PageUp/PageDown | Browse up to 5,000 lines of scrollback. Typing returns to the live screen. |
 | Resize window | Resize the grid and hosted console in every tab. |
 | `exit` | End the current shell and close its tab. |
@@ -94,6 +96,13 @@ underline, and inverse text. UTF-8 output can arrive across arbitrary read
 boundaries; Windows text input preserves UTF-16 surrogate pairs. Wide and
 combining characters retain their terminal cell positions. Window title and
 basic device/status/cursor queries are supported.
+
+Mouse-aware programs such as Codex receive a left-button press and release
+once a click is complete. At the winsh prompt and in other keyboard-driven
+editors, the terminal sends arrow keys to move along the visible cursor's line.
+For Claude Code's inline editor, the terminal defaults
+`CLAUDE_CODE_NATIVE_CURSOR` to `1` so the editor exposes its caret position.
+An existing setting takes precedence. [Claude Code environment variables](https://code.claude.com/docs/en/env-vars)
 
 GDI renders Cascadia Mono by default with a Windows fallback and per-monitor
 DPI scaling. For private-use icon characters, the terminal loads
@@ -160,9 +169,9 @@ continues using the last valid settings.
 
 ## Current limits
 
-The terminal has no settings UI,
-mouse selection, terminal mouse reporting, search, hyperlinks, font zoom,
-graphics protocols, or saved sessions. Copying copies the whole visible screen.
+The terminal has no settings UI, search, hyperlinks, font zoom,
+graphics protocols, or saved sessions. Terminal mouse reporting covers left
+clicks. Drags select locally and the wheel browses terminal scrollback.
 Font fallback and complex emoji shaping are limited by GDI. Width changes
 truncate or extend existing rows rather than reflowing old text. Scrollback
 has no scrollbar. This is a basic VT terminal, not full xterm compatibility.
@@ -185,8 +194,12 @@ cargo test --locked --workspace --all-targets
 Tests cover cell rendering state, escape/UTF-8 fragmentation, colors, alternate
 screens, scrollback, queries, input encoding, actual ConPTY input/output,
 resizing as observed by a console child, startup failure, and descendant cleanup.
-The keyboard, console, and descendant subprocess fixtures run as part of
-those tests.
+The suite also drags and clicks in a live console editor and checks where the
+next typed character appears. To repeat that test with another configured
+editor, set `WINSH_TEST_EDITOR` to its executable path and
+`WINSH_TEST_EDITOR_READY` to ASCII text displayed once its composer is ready.
+Run `cargo test -p winsh-terminal --lib external_editor_click_and_drag -- --ignored`.
+The test types into an empty composer and closes the session without submitting.
 
 The opt-in shell tests cover suspending and resuming jobs, foreground input,
 Ctrl+C isolation, Tab completion, persistent command recall across terminal restarts,

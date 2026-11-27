@@ -84,15 +84,54 @@ impl KeyboardState {
         };
         let mut bytes = Vec::new();
         for unit in characters {
-            write!(
-                bytes,
-                "\x1b[{code};{scan};{unit};{};{state};{repeat}_",
-                u8::from(down)
-            )
-            .expect("writing to Vec");
+            write_native_key(&mut bytes, code, scan, *unit, down, state, repeat);
         }
         bytes
     }
+}
+
+fn write_native_key(
+    bytes: &mut Vec<u8>,
+    code: u16,
+    scan: u32,
+    unit: u16,
+    down: bool,
+    state: u32,
+    repeat: u16,
+) {
+    write!(
+        bytes,
+        "\x1b[{code};{scan};{unit};{};{state};{repeat}_",
+        u8::from(down)
+    )
+    .expect("writing to Vec");
+}
+
+/// Match unmodified physical arrow presses, including releases for native readers.
+pub(super) fn horizontal_steps(
+    left: bool,
+    count: usize,
+    native: bool,
+    application: bool,
+) -> Vec<u8> {
+    let key = if native {
+        let (code, scan) = if left {
+            (VK_LEFT, 0x4b)
+        } else {
+            (VK_RIGHT, 0x4d)
+        };
+        let mut key = Vec::new();
+        write_native_key(&mut key, code, scan, 0, true, ENHANCED_KEY, 1);
+        write_native_key(&mut key, code, scan, 0, false, ENHANCED_KEY, 1);
+        key
+    } else {
+        input::key(
+            if left { Key::Left } else { Key::Right },
+            Modifiers::default(),
+            application,
+        )
+    };
+    key.repeat(count)
 }
 
 /// Older ConPTY versions take VT sequences. Returning None lets Windows

@@ -1,3 +1,4 @@
+use std::ops::Range;
 use vt100::{Callbacks, Parser, Screen};
 
 pub const SCROLLBACK_LINES: usize = 5_000;
@@ -7,6 +8,15 @@ pub const SCROLLBACK_LINES: usize = 5_000;
 pub struct Terminal {
     parser: Parser<Responses>,
     dirty: bool,
+    selection: Option<Selection>,
+    view_revision: u64,
+}
+
+struct Selection {
+    // Ordered insertion boundaries in the visible grid. The end is exclusive.
+    start: (u16, u16),
+    end: (u16, u16),
+    text: String,
 }
 
 impl Terminal {
@@ -19,12 +29,24 @@ impl Terminal {
                 Responses::default(),
             ),
             dirty: true,
+            selection: None,
+            view_revision: 0,
         }
     }
 
     /// Replies go back into ConPTY's input channel, never onto the display.
     pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let alternate = self.screen().alternate_screen();
         self.parser.process(bytes);
+        if alternate != self.screen().alternate_screen()
+            || self.selection.as_ref().is_some_and(|s| {
+                self.screen()
+                    .contents_between(s.start.0, s.start.1, s.end.0, s.end.1)
+                    != s.text
+            })
+        {
+            self.change_view();
+        }
         self.dirty = true;
         std::mem::take(&mut self.parser.callbacks_mut().bytes)
     }
@@ -38,6 +60,7 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, rows: u16, columns: u16) {
+        self.change_view();
         self.parser
             .screen_mut()
             .set_size(rows.max(1), columns.max(1));
@@ -48,12 +71,61 @@ impl Terminal {
         let current = self.screen().scrollback();
         let next = current.saturating_add_signed(lines as isize);
         self.parser.screen_mut().set_scrollback(next);
+        if self.screen().scrollback() != current {
+            self.change_view();
+        }
         self.dirty = true;
     }
 
     pub fn follow_output(&mut self) {
         self.parser.screen_mut().set_scrollback(0);
+        self.change_view();
         self.dirty = true;
+    }
+
+    fn change_view(&mut self) {
+        self.selection = None;
+        self.view_revision = self.view_revision.wrapping_add(1);
+    }
+
+    pub fn view_revision(&self) -> u64 {
+        self.view_revision
+    }
+
+    /// Select between two visible character boundaries, in either direction.
+    pub fn select(&mut self, anchor: (u16, u16), end: (u16, u16)) {
+        let (rows, cols) = self.screen().size();
+        let clamp = |(r, c): (u16, u16)| (r.min(rows - 1), c.min(cols));
+        let (anchor, end) = (clamp(anchor), clamp(end));
+        let (start, end) = (anchor.min(end), anchor.max(end));
+        self.selection = (start != end).then(|| Selection {
+            start,
+            end,
+            text: self
+                .screen()
+                .contents_between(start.0, start.1, end.0, end.1),
+        });
+        self.dirty = true;
+    }
+
+    pub fn selected_columns(&self, row: u16) -> Option<Range<u16>> {
+        let s = self.selection.as_ref()?;
+        if !(s.start.0..=s.end.0).contains(&row) {
+            return None;
+        }
+        let left = if row == s.start.0 { s.start.1 } else { 0 };
+        let right = if row == s.end.0 {
+            s.end.1
+        } else {
+            self.screen().size().1
+        };
+        Some(left..right)
+    }
+
+    pub fn copy_contents(&self) -> String {
+        self.selection
+            .as_ref()
+            .map_or_else(|| self.screen().contents(), |s| s.text.clone())
     }
 
     pub fn take_dirty(&mut self) -> bool {

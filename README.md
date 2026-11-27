@@ -129,8 +129,10 @@ cargo run -p winsh-terminal
 
 The terminal finds `winsh.exe` beside its own executable. It supports a resizable
 window, Unicode, cursor movement, colors, alternate screens, and scrollback.
-Use Ctrl+Shift+V to paste, Ctrl+Shift+C to copy the visible screen, and the mouse
-wheel or Shift+PageUp/PageDown to scroll. `exit` closes the window. See
+Click within the input line to position the cursor, or drag to highlight text.
+Ctrl+Shift+C copies the selection, or the visible screen when nothing is selected.
+Use Ctrl+Shift+V to paste and the mouse wheel or Shift+PageUp/PageDown to scroll.
+`exit` closes the window. See
 [the terminal guide](docs/terminal.md) for controls, other shells, and limits.
 
 Set the dedicated terminal’s font in `%APPDATA%\winsh\settings.json`. It

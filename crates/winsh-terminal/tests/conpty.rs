@@ -296,6 +296,10 @@ fn winsh_new_profile_and_custom_prompt_in_a_live_terminal() {
     );
     h.wait_for("\nfolder-src [1]>");
     assert_eq!(
+        h.terminal.lock().unwrap().reported_directory(),
+        Some(env::current_dir().unwrap().join("src").as_path())
+    );
+    assert_eq!(
         h.terminal.lock().unwrap().take_title().as_deref(),
         Some("src")
     );

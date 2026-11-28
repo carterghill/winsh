@@ -8,7 +8,7 @@ use std::{
         ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
-    path::Path,
+    path::{Path, PathBuf},
     ptr,
     sync::{
         Arc, Mutex,
@@ -55,7 +55,7 @@ pub enum Event {
 }
 
 pub struct Session {
-    pub(crate) initial_title: String,
+    pub(crate) initial_directory: PathBuf,
     stop_event: Vec<u16>,
     input: mpsc::Sender<Vec<u8>>,
     control: mpsc::Sender<Control>,
@@ -71,6 +71,24 @@ impl Session {
         columns: u16,
         terminal: Arc<Mutex<Terminal>>,
     ) -> io::Result<Self> {
+        Self::spawn_in(
+            program,
+            arguments,
+            &std::env::current_dir()?,
+            rows,
+            columns,
+            terminal,
+        )
+    }
+
+    pub(crate) fn spawn_in(
+        program: &Path,
+        arguments: &[OsString],
+        directory: &Path,
+        rows: u16,
+        columns: u16,
+        terminal: Arc<Mutex<Terminal>>,
+    ) -> io::Result<Self> {
         static NEXT_SESSION: AtomicUsize = AtomicUsize::new(1);
         let name = format!(
             "Local\\winsh-stop-{}-{}",
@@ -78,10 +96,7 @@ impl Session {
             NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
         );
         let stop_event = wide(OsStr::new(&name))?;
-        let cwd = std::env::current_dir()?;
-        let initial_title = cwd.file_name().unwrap_or(cwd.as_os_str());
-        let mut resources =
-            Resources::create(program, arguments, rows, columns, &name, initial_title)?;
+        let mut resources = Resources::create(program, arguments, rows, columns, &name, directory)?;
         let mut output = resources.console.output.take().expect("new output pipe");
         let (input, writes) = mpsc::channel::<Vec<u8>>();
         let (control, controls) = mpsc::channel();
@@ -182,13 +197,19 @@ impl Session {
             let _ = events_send.send(Event::Exited(status));
         });
         Ok(Self {
-            initial_title: initial_title.to_string_lossy().into_owned(),
+            initial_directory: directory.to_owned(),
             stop_event,
             input,
             control,
             events,
             worker: Some(worker),
         })
+    }
+
+    pub(crate) fn initial_title(&self) -> String {
+        directory_title(&self.initial_directory)
+            .to_string_lossy()
+            .into_owned()
     }
 
     pub fn write(&self, bytes: Vec<u8>) -> io::Result<()> {
@@ -262,7 +283,7 @@ impl Resources {
         rows: u16,
         columns: u16,
         stop_event: &str,
-        initial_title: &OsStr,
+        directory: &Path,
     ) -> io::Result<Self> {
         let program = program.canonicalize()?;
         let application = wide(program.as_os_str())?;
@@ -293,7 +314,8 @@ impl Resources {
         let attributes = Attributes::new(handle)?;
         let job = job()?;
         let mut startup = STARTUPINFOEXW::default();
-        let mut title = wide(initial_title)?;
+        let mut title = wide(directory_title(directory))?;
+        let directory = wide(directory.as_os_str())?;
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
         startup.StartupInfo.lpTitle = title.as_mut_ptr();
         // Explicit null standard handles let ConPTY populate console handles.
@@ -314,7 +336,7 @@ impl Resources {
                 0,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                 environment.as_ptr().cast(),
-                ptr::null(),
+                directory.as_ptr(),
                 &startup.StartupInfo,
                 &mut information,
             )
@@ -348,6 +370,10 @@ impl Resources {
             input: input_write.into(),
         })
     }
+}
+
+fn directory_title(directory: &Path) -> &OsStr {
+    directory.file_name().unwrap_or(directory.as_os_str())
 }
 
 fn size(rows: u16, columns: u16) -> COORD {

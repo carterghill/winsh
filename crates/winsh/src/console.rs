@@ -45,25 +45,45 @@ pub fn read_line_unbuffered(input: &mut File, line: &mut String) -> io::Result<u
 }
 
 #[cfg(windows)]
-pub use windows::{Handler, read_line, set_directory_title};
+pub use windows::{Handler, read_line, report_directory};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows {
-    use std::{io, os::windows::ffi::OsStrExt, path::Path};
+    use std::{
+        io::{self, Write},
+        os::windows::ffi::OsStrExt,
+        path::Path,
+    };
     use windows_sys::Win32::{
         Foundation::{ERROR_OPERATION_ABORTED, GetLastError, SetLastError},
         System::Console::{
-            CONSOLE_READCONSOLE_CONTROL, CTRL_BREAK_EVENT, CTRL_C_EVENT, GetConsoleCP,
-            GetStdHandle, ReadConsoleW, STD_INPUT_HANDLE, SetConsoleCtrlHandler, SetConsoleTitleW,
+            CONSOLE_READCONSOLE_CONTROL, CTRL_BREAK_EVENT, CTRL_C_EVENT,
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP, GetStdHandle, ReadConsoleW,
+            STD_INPUT_HANDLE, SetConsoleCtrlHandler, SetConsoleTitleW,
         },
     };
 
-    pub fn set_directory_title(cwd: &Path) {
+    pub fn report_directory(cwd: &Path) {
         let name = cwd.file_name().unwrap_or(cwd.as_os_str());
         let title: Vec<_> = name.encode_wide().chain([0]).collect();
         // SAFETY: title is NUL terminated and lives through the call.
         unsafe { SetConsoleTitleW(title.as_ptr()) };
+
+        // Report the absolute directory separately from the editable tab title.
+        // Querying console mode also keeps the sequence out of redirected stderr.
+        if std::env::var_os("WINSH_TERMINAL_STOP_EVENT").is_some()
+            && let Some(path) = cwd.to_str()
+            && !path.chars().any(char::is_control)
+        {
+            let mut output = io::stderr();
+            let vt = ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            if winapi_util::console::mode(&output).is_ok_and(|flags| {
+                flags & vt != 0 || winapi_util::console::set_mode(&output, flags | vt).is_ok()
+            }) {
+                let _ = write!(output, "\x1b]9;9;\"{path}\"\x1b\\");
+            }
+        }
     }
 
     // Protect the shell process. ReadConsoleW reports interrupted input itself,

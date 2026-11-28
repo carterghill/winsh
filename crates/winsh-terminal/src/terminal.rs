@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use vt100::{Callbacks, Parser, Screen};
 
 pub const SCROLLBACK_LINES: usize = 5_000;
@@ -135,12 +136,17 @@ impl Terminal {
     pub fn take_title(&mut self) -> Option<String> {
         self.parser.callbacks_mut().title.take()
     }
+
+    pub fn reported_directory(&self) -> Option<&Path> {
+        self.parser.callbacks().directory.as_deref()
+    }
 }
 
 #[derive(Default)]
 struct Responses {
     bytes: Vec<u8>,
     title: Option<String>,
+    directory: Option<PathBuf>,
     win32_input_mode: bool,
 }
 
@@ -161,6 +167,17 @@ impl Callbacks for Responses {
             && parts.len() > 1
         {
             self.set_window_title(screen, &parts.join(&b';'));
+        } else if let [b"9", b"9", parts @ ..] = params {
+            let joined = parts.join(&b';');
+            if let Ok(path) = std::str::from_utf8(&joined) {
+                let path = path
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .unwrap_or(path);
+                if Path::new(path).is_absolute() && !path.chars().any(char::is_control) {
+                    self.directory = Some(PathBuf::from(path));
+                }
+            }
         }
     }
 

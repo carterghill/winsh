@@ -135,9 +135,10 @@ Use Ctrl+Shift+V to paste and the mouse wheel or Shift+PageUp/PageDown to scroll
 `exit` closes the window. See
 [the terminal guide](docs/terminal.md) for controls, other shells, and limits.
 
-Set the dedicated terminal’s font in `%APPDATA%\winsh\settings.json`. It
-defaults to Cascadia Mono at 14 logical pixels and applies edits to open tabs.
-[Font settings](docs/terminal.md#font-settings)
+New tabs open in the active Winsh tab’s working directory. Choose the home
+folder or a custom folder in `%APPDATA%\winsh\settings.json`. The same file
+controls the font, which defaults to Cascadia Mono at 14 logical pixels.
+[Terminal settings](docs/terminal.md#terminal-settings)
 
 Edit terminal shortcuts in `%APPDATA%\winsh\keymap.json`. By default,
 Ctrl+Left/Right switches tabs and Alt+Left/Right moves one word at the winsh

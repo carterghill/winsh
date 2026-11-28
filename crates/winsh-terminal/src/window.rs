@@ -49,7 +49,7 @@ mod titlebar;
 use fonts::{Fonts, Symbols};
 use keyboard::KeyboardState;
 use keymap::{Action, Keymap};
-use settings::{ConfigFile, FontSettings};
+use settings::{ConfigFile, NewTabDirectory, TerminalSettings};
 use titlebar::{Control, Layout, px};
 
 const PADDING: i32 = 12;
@@ -225,13 +225,21 @@ impl Tab {
     fn spawn(
         program: &Path,
         arguments: &[OsString],
+        directory: &Path,
         (rows, columns): (u16, u16),
     ) -> io::Result<Self> {
         let terminal = Arc::new(Mutex::new(Terminal::new(rows, columns)));
-        let session = Session::spawn(program, arguments, rows, columns, Arc::clone(&terminal))?;
+        let session = Session::spawn_in(
+            program,
+            arguments,
+            directory,
+            rows,
+            columns,
+            Arc::clone(&terminal),
+        )?;
         Ok(Self {
             terminal,
-            title: session.initial_title.clone(),
+            title: session.initial_title(),
             session,
             text: TextInput::default(),
             wheel: 0,
@@ -251,8 +259,8 @@ struct State {
     gesture: Option<mouse::Gesture>,
     title_dirty: bool,
     fonts: Fonts,
-    font_settings: FontSettings,
-    settings_file: Option<ConfigFile<FontSettings>>,
+    settings: TerminalSettings,
+    settings_file: Option<ConfigFile<TerminalSettings>>,
     keymap: Keymap,
     keymap_file: Option<ConfigFile<Keymap>>,
     symbols: Symbols,
@@ -284,11 +292,16 @@ impl State {
             None => (Keymap::default(), None),
         };
         let initial = settings_file.as_ref().map(|file| file.current.clone());
-        let font_settings = FontSettings::default();
-        let fonts = Fonts::new(dpi, &font_settings)?;
+        let settings = TerminalSettings::default();
+        let fonts = Fonts::new(dpi, &settings.font)?;
         let size = (30, 100);
         let mut state = Self {
-            tabs: vec![Tab::spawn(program, arguments, size)?],
+            tabs: vec![Tab::spawn(
+                program,
+                arguments,
+                &std::env::current_dir()?,
+                size,
+            )?],
             active: 0,
             program: program.to_owned(),
             arguments: arguments.to_owned(),
@@ -299,7 +312,7 @@ impl State {
             gesture: None,
             title_dirty: true,
             fonts,
-            font_settings,
+            settings,
             settings_file,
             keymap,
             keymap_file,
@@ -313,7 +326,7 @@ impl State {
             status: 0,
         };
         if let Some(initial) = initial {
-            state.apply_font(initial);
+            state.apply_settings(initial);
         }
         Ok(state)
     }
@@ -360,7 +373,32 @@ impl State {
             Control::Tab(index) => self.select(index),
             Control::CloseTab(index) => self.close(index),
             Control::New => {
-                let tab = Tab::spawn(&self.program, &self.arguments, self.size)?;
+                let directory = match &self.settings.new_tab_directory {
+                    NewTabDirectory::Current => {
+                        let tab = self.current();
+                        tab.terminal
+                            .lock()
+                            .unwrap()
+                            .reported_directory()
+                            .unwrap_or(&tab.session.initial_directory)
+                            .to_owned()
+                    }
+                    NewTabDirectory::Home => std::env::var_os("HOME")
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_absolute())
+                        .or_else(std::env::home_dir)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "Could not find the home folder.",
+                            )
+                        })?,
+                    NewTabDirectory::Custom { path } => path.clone(),
+                };
+                let tab = Tab::spawn(&self.program, &self.arguments, &directory, self.size)
+                    .map_err(|err| {
+                        io::Error::new(err.kind(), format!("{}: {err}", directory.display()))
+                    })?;
                 self.tabs.push(tab);
                 self.select(self.tabs.len() - 1);
             }
@@ -518,7 +556,7 @@ impl State {
             }
         }
         let update = self.settings_file.as_mut().and_then(ConfigFile::poll);
-        let mut redraw = update.is_some_and(|settings| self.apply_font(settings));
+        let mut redraw = update.is_some_and(|settings| self.apply_settings(settings));
         for index in (0..self.tabs.len()).rev() {
             let tab = &mut self.tabs[index];
             let mut exit = None;
@@ -550,7 +588,7 @@ impl State {
             }
             if let Some(title) = terminal.take_title() {
                 let title = if title.is_empty() {
-                    tab.session.initial_title.clone()
+                    tab.session.initial_title()
                 } else {
                     title
                 };
@@ -569,19 +607,22 @@ impl State {
         redraw
     }
 
-    fn apply_font(&mut self, update: Result<FontSettings, String>) -> bool {
+    fn apply_settings(&mut self, update: Result<TerminalSettings, String>) -> bool {
         let settings = match update {
-            Ok(settings) if settings == self.font_settings => return false,
             Ok(settings) => settings,
             Err(error) => {
                 self.error = Some(error);
                 return false;
             }
         };
-        match Fonts::new(self.dpi, &settings) {
+        if self.settings.font == settings.font {
+            self.settings = settings;
+            return false;
+        }
+        match Fonts::new(self.dpi, &settings.font) {
             Ok(fonts) => {
                 self.fonts = fonts;
-                self.font_settings = settings;
+                self.settings = settings;
                 self.resize(self.client_size.0, self.client_size.1);
                 true
             }
@@ -958,7 +999,7 @@ unsafe extern "system" fn window_proc(
             }
             WM_DPICHANGED if !state.is_null() => {
                 let dpi = (wparam as u32 & 0xffff).max(96);
-                if let Ok(fonts) = Fonts::new(dpi, &(*state).font_settings) {
+                if let Ok(fonts) = Fonts::new(dpi, &(*state).settings.font) {
                     (*state).fonts = fonts;
                 }
                 (*state).dpi = dpi;
@@ -1422,6 +1463,87 @@ mod tests {
     }
 
     #[test]
+    fn new_tabs_use_the_selected_shell_directory_or_the_configured_override() {
+        fn wait(state: &mut State, ready: impl Fn(&State) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready(state) {
+                state.tick();
+                assert!(state.error.is_none(), "{:?}", state.error);
+                assert!(
+                    Instant::now() < deadline,
+                    "screen: {}",
+                    state.current().terminal.lock().unwrap().screen().contents()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        fn check_child_directory(state: &mut State, expected: &Path) {
+            state.send(b"title started %CD%\r".to_vec());
+            let title = format!("started {}", expected.display());
+            wait(state, |s| s.current().title.ends_with(&title));
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        let project = temp.path().join("project space;日本");
+        std::fs::create_dir(&project).unwrap();
+        let program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        let mut state = State::new(
+            &program,
+            &["/d".into(), "/q".into()],
+            96,
+            Some(temp.path().into()),
+        )
+        .unwrap();
+        check_child_directory(&mut state, &std::env::current_dir().unwrap());
+        state.send(
+            format!("prompt $e]9;9;$P$e\\$G\rcd /d \"{}\"\r", project.display()).into_bytes(),
+        );
+        wait(&mut state, |s| {
+            s.current().terminal.lock().unwrap().reported_directory() == Some(&project)
+        });
+        state.activate(Control::New).unwrap();
+        check_child_directory(&mut state, &project);
+
+        let custom = serde_json::json!({"terminal": {"new_tab_directory": {"mode": "custom", "path": temp.path()}}});
+        std::fs::write(&path, custom.to_string()).unwrap();
+        wait(&mut state, |s| {
+            matches!(s.settings.new_tab_directory, NewTabDirectory::Custom { .. })
+        });
+        state.activate(Control::New).unwrap();
+        check_child_directory(&mut state, temp.path());
+
+        std::fs::write(
+            &path,
+            r#"{"terminal":{"new_tab_directory":{"mode":"home"}}}"#,
+        )
+        .unwrap();
+        wait(&mut state, |s| {
+            s.settings.new_tab_directory == NewTabDirectory::Home
+        });
+        state.activate(Control::New).unwrap();
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(std::env::home_dir)
+            .unwrap();
+        check_child_directory(&mut state, &home);
+
+        // A font-only settings file uses the default. A shell that has never
+        // reported its cwd can still pass its starting directory to a new tab.
+        std::fs::write(&path, r#"{"terminal":{"font_size_px":14}}"#).unwrap();
+        wait(&mut state, |s| {
+            s.settings.new_tab_directory == NewTabDirectory::Current
+        });
+        state.select(2);
+        state.activate(Control::New).unwrap();
+        check_child_directory(&mut state, temp.path());
+        state.select(0);
+        state.activate(Control::New).unwrap();
+        check_child_directory(&mut state, &project);
+    }
+
+    #[test]
     fn saving_font_settings_resizes_live_tabs_and_recovers_from_invalid_edits() {
         use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
@@ -1437,7 +1559,7 @@ mod tests {
         assert!(path.is_file());
         assert_eq!(
             state.settings_file.as_ref().unwrap().current,
-            Ok(FontSettings::default())
+            Ok(TerminalSettings::default())
         );
         state.resize(800, 600);
         state.activate(Control::New).unwrap();
@@ -1459,30 +1581,30 @@ mod tests {
             .unwrap();
         replacement.persist(&path).unwrap();
         wait_for(&mut state, &|s| {
-            s.font_settings.font_size_px == 16.0
+            s.settings.font.font_size_px == 16.0
                 && s.tabs
                     .iter()
                     .all(|tab| tab.terminal.lock().unwrap().screen().size() == s.size)
         });
         assert!(state.fonts.height > original_height && state.size.0 < original_grid.0);
-        assert_eq!(state.font_settings.font_family, "Cascadia Mono");
+        assert_eq!(state.settings.font.font_family, "Cascadia Mono");
         assert!(Arc::ptr_eq(&original_tab, &state.current().terminal));
 
         std::fs::write(&path, r#"{"terminal":{"font_size_px":0}}"#).unwrap();
         wait_for(&mut state, &|s| s.error.is_some());
         assert!(state.error.take().unwrap().contains("font_size_px"));
-        assert_eq!(state.font_settings.font_size_px, 16.0);
+        assert_eq!(state.settings.font.font_size_px, 16.0);
         std::fs::write(&path, "{").unwrap();
         wait_for(&mut state, &|s| s.error.is_some());
         assert!(state.error.take().unwrap().contains("settings.json"));
-        assert_eq!(state.font_settings.font_size_px, 16.0);
+        assert_eq!(state.settings.font.font_size_px, 16.0);
         std::fs::write(&path, r#"{"terminal":{"font_family":"Consolas"}}"#).unwrap();
-        wait_for(&mut state, &|s| s.font_settings.font_family == "Consolas");
-        assert_eq!(state.font_settings.font_size_px, 14.0);
-        let reopened = ConfigFile::<FontSettings>::open(path.clone());
-        assert_eq!(reopened.current.as_ref().unwrap(), &state.font_settings);
+        wait_for(&mut state, &|s| s.settings.font.font_family == "Consolas");
+        assert_eq!(state.settings.font.font_size_px, 14.0);
+        let reopened = ConfigFile::<TerminalSettings>::open(path.clone());
+        assert_eq!(reopened.current.as_ref().unwrap(), &state.settings);
         std::fs::remove_file(path).unwrap();
-        wait_for(&mut state, &|s| s.font_settings == FontSettings::default());
+        wait_for(&mut state, &|s| s.settings == TerminalSettings::default());
         assert_eq!(state.size, original_grid);
     }
 
@@ -1540,7 +1662,7 @@ mod tests {
         state.current_mut().terminal = Arc::new(Mutex::new(terminal));
         for dpi in [96, 120, 144, 192] {
             state.dpi = dpi;
-            state.fonts = Fonts::new(dpi, &state.font_settings).unwrap();
+            state.fonts = Fonts::new(dpi, &state.settings.font).unwrap();
             let w = state.fonts.width;
             let h = state.fonts.height;
             let x = px(dpi, PADDING);

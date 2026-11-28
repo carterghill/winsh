@@ -27,7 +27,7 @@ cargo build --workspace --release
 
 Keep `winsh-terminal.exe` and `winsh.exe` together. The launcher resolves the
 default shell beside its own executable, independently of the working directory.
-The shell inherits the launcher's working directory and environment, with
+The first tab inherits the launcher's working directory and environment, with
 `TERM=xterm-256color` so programs such as Nano can look up the terminal's
 colors and keyboard sequences in their terminfo database.
 
@@ -63,7 +63,8 @@ using Windows argument quoting. `--help` displays a controls and usage dialog.
 ## Controls and display
 
 Each title-bar tab hosts a separate shell with its own screen and scrollback.
-New tabs start with the launcher's working directory, executable, and arguments.
+New tabs use the same executable and arguments. By default they open in the
+active tab's working directory.
 Each winsh tab shows the name of its current folder and updates when you change
 directories. At a drive root, the tab shows the drive (for example, `C:\`).
 Click a tab to switch sessions. When the strip fills up, the chevrons reveal
@@ -146,20 +147,35 @@ Key names are case-insensitive. Combine `ctrl` (or `control`), `alt`, and
 Delete, Backspace, Enter, Space, and Escape. Word actions send Alt+Left or
 Alt+Right to the hosted program, which handles movement in its own editor.
 
-## Font settings
+## Terminal settings
 
 On first launch the dedicated terminal creates `%APPDATA%\winsh\settings.json`
-beside `winshrc`. Save an edit to update the text and icon sizes in all open
-tabs. Each shell session keeps running.
+beside `winshrc`. Open windows apply saved changes automatically.
 
 ~~~json
 {
   "terminal": {
     "font_family": "Cascadia Mono",
-    "font_size_px": 14
+    "font_size_px": 14,
+    "new_tab_directory": { "mode": "current" }
   }
 }
 ~~~
+
+Choose a `new_tab_directory` value for tabs opened with the + button or a
+keyboard shortcut. The first tab in each window uses the launcher's directory.
+
+| Value | Where the new tab starts |
+| --- | --- |
+| `{ "mode": "current" }` | The active tab's working directory (default). |
+| `{ "mode": "home" }` | The launcher's `HOME` if it is an absolute path, otherwise the Windows user profile folder. |
+| `{ "mode": "custom", "path": "D:/Projects" }` | The specified folder. Use an absolute path to an existing directory. |
+
+Winsh reports its directory at each prompt. Other shells can report theirs
+using OSC 9;9. Until a shell reports a directory, `current` uses that tab's
+starting folder. [Directory reporting for other shells](https://learn.microsoft.com/en-us/windows/terminal/tutorials/new-tab-same-directory)
+
+### Font settings
 
 Choose an installed monospaced font for `font_family`. The size is in logical
 pixels at 100% Windows scaling and accepts values from 1 to 256, including

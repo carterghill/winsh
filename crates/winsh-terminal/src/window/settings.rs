@@ -38,28 +38,55 @@ impl Default for FontSettings {
 #[derive(Deserialize)]
 struct Settings {
     #[serde(default)]
-    terminal: FontSettings,
+    terminal: TerminalSettings,
 }
 
-impl Config for FontSettings {
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub(super) struct TerminalSettings {
+    #[serde(flatten)]
+    pub font: FontSettings,
+    pub new_tab_directory: NewTabDirectory,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub(super) enum NewTabDirectory {
+    #[default]
+    Current,
+    Home,
+    Custom {
+        path: PathBuf,
+    },
+}
+
+impl Config for TerminalSettings {
     const STARTER: &'static str = include_str!("../../assets/settings.json");
 
     fn parse(json: &str) -> io::Result<Self> {
         let Settings { terminal } = serde_json::from_str(json)?;
         // GDI's LF_FACESIZE includes the terminating UTF-16 NUL.
-        if terminal.font_family.trim().is_empty()
-            || terminal.font_family.contains('\0')
-            || terminal.font_family.encode_utf16().count() >= 32
+        if terminal.font.font_family.trim().is_empty()
+            || terminal.font.font_family.contains('\0')
+            || terminal.font.font_family.encode_utf16().count() >= 32
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "font_family must be a Windows font name of 1 to 31 UTF-16 units",
             ));
         }
-        if !(1.0..=256.0).contains(&terminal.font_size_px) {
+        if !(1.0..=256.0).contains(&terminal.font.font_size_px) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "font_size_px must be between 1 and 256",
+            ));
+        }
+        if let NewTabDirectory::Custom { path } = &terminal.new_tab_directory
+            && (!path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "new_tab_directory.path must be an absolute folder path",
             ));
         }
         Ok(terminal)

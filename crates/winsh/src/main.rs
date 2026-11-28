@@ -175,7 +175,7 @@ fn input_loop(shell: &mut Shell, streams: &mut ShellIo, interactive: bool) -> io
                 return Ok(code);
             }
             #[cfg(windows)]
-            console::set_directory_title(shell.cwd());
+            console::report_directory(shell.cwd());
         }
         let mut line = String::new();
         let read = input.read_line(shell, streams, &pending, &mut line);

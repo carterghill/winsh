@@ -1,6 +1,7 @@
 {
   "terminal": {
     "font_family": "Cascadia Mono",
-    "font_size_px": 14
+    "font_size_px": 14,
+    "new_tab_directory": { "mode": "current" }
   }
 }

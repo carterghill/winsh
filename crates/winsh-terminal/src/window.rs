@@ -1014,11 +1014,14 @@ unsafe extern "system" fn window_proc(
                 0
             }
             WM_MOUSEWHEEL if !state.is_null() => {
-                let tab = (*state).current_mut();
-                tab.wheel += (wparam >> 16) as i16 as i32;
-                let lines = tab.wheel / 120 * 3;
-                tab.wheel %= 120;
-                tab.terminal.lock().unwrap().scroll(lines);
+                let mut pt = point(lparam);
+                if ScreenToClient(hwnd, &mut pt) != 0 {
+                    (*state).mouse_wheel(
+                        pt,
+                        (wparam >> 16) as i16,
+                        KeyboardState::read().modifiers(),
+                    );
+                }
                 0
             }
             WM_SETCURSOR if !state.is_null() && lparam as u16 == HTCLIENT as u16 => {

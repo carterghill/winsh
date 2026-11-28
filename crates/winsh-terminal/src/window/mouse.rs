@@ -2,10 +2,17 @@ use super::{KeyboardState, Modifiers, PADDING, POINT, State, Terminal, keyboard,
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use windows_sys::Win32::UI::{
     HiDpi::GetSystemMetricsForDpi,
-    WindowsAndMessaging::{SM_CXDRAG, SM_CYDRAG},
+    WindowsAndMessaging::{SM_CXDRAG, SM_CYDRAG, WHEEL_DELTA},
 };
 
 type Position = (u16, u16);
+
+#[derive(Clone, Copy)]
+enum Button {
+    Left = 0,
+    WheelUp = 64,
+    WheelDown = 65,
+}
 
 #[derive(Clone, Copy)]
 struct Hit {
@@ -34,6 +41,22 @@ impl State {
             self.fonts.width,
             self.fonts.height,
         )
+    }
+
+    pub(super) fn mouse_wheel(&mut self, pt: POINT, delta: i16, modifiers: Modifiers) {
+        let remainder = &mut self.current_mut().wheel;
+        *remainder += i32::from(delta);
+        let ticks = *remainder / WHEEL_DELTA as i32;
+        *remainder %= WHEEL_DELTA as i32;
+        if ticks == 0 {
+            return;
+        }
+
+        let mut terminal = self.current().terminal.lock().unwrap();
+        let hit = self.grid_hit(terminal.screen(), pt);
+        let bytes = wheel_input(&mut terminal, hit, ticks, modifiers);
+        drop(terminal);
+        self.send(bytes);
     }
 
     pub(super) fn begin_gesture(&mut self, pt: POINT) -> bool {
@@ -107,13 +130,30 @@ fn hit_test(screen: &Screen, x: i32, y: i32, width: i32, height: i32) -> Hit {
     }
 }
 
+fn wheel_input(terminal: &mut Terminal, hit: Hit, ticks: i32, modifiers: Modifiers) -> Vec<u8> {
+    let screen = terminal.screen();
+    if screen.scrollback() != 0 || screen.mouse_protocol_mode() == MouseProtocolMode::None {
+        terminal.scroll(ticks * 3);
+        return Vec::new();
+    }
+    if !hit.inside {
+        return Vec::new();
+    }
+    let button = if ticks > 0 {
+        Button::WheelUp
+    } else {
+        Button::WheelDown
+    };
+    mouse_report(screen, hit.cell, modifiers, button).repeat(ticks.unsigned_abs() as usize)
+}
+
 fn click_input(terminal: &Terminal, hit: Hit, modifiers: Modifiers) -> Vec<u8> {
     let screen = terminal.screen();
     if screen.scrollback() != 0 {
         return Vec::new();
     }
     if screen.mouse_protocol_mode() != MouseProtocolMode::None {
-        return mouse_report(screen, hit.cell, modifiers);
+        return mouse_report(screen, hit.cell, modifiers, Button::Left);
     }
     if screen.hide_cursor() {
         return Vec::new();
@@ -160,22 +200,29 @@ fn click_input(terminal: &Terminal, hit: Hit, modifiers: Modifiers) -> Vec<u8> {
     )
 }
 
-fn mouse_report(screen: &Screen, (row, col): Position, modifiers: Modifiers) -> Vec<u8> {
+fn mouse_report(
+    screen: &Screen,
+    (row, col): Position,
+    modifiers: Modifiers,
+    button: Button,
+) -> Vec<u8> {
     let press_only = screen.mouse_protocol_mode() == MouseProtocolMode::Press;
-    let button = if press_only {
+    let release = matches!(button, Button::Left) && !press_only;
+    let modifier_bits = if press_only {
         0
     } else {
         4 * u8::from(modifiers.shift)
             + 8 * u8::from(modifiers.alt)
             + 16 * u8::from(modifiers.control)
     };
+    let code = button as u8 + modifier_bits;
     let x = u32::from(col) + 1;
     let y = u32::from(row) + 1;
     let encoding = screen.mouse_protocol_encoding();
     if encoding == MouseProtocolEncoding::Sgr {
-        let mut bytes = format!("\x1b[<{button};{x};{y}M").into_bytes();
-        if !press_only {
-            bytes.extend(format!("\x1b[<{button};{x};{y}m").bytes());
+        let mut bytes = format!("\x1b[<{code};{x};{y}M").into_bytes();
+        if release {
+            bytes.extend(format!("\x1b[<{code};{x};{y}m").bytes());
         }
         return bytes;
     }
@@ -188,9 +235,9 @@ fn mouse_report(screen: &Screen, (row, col): Position, modifiers: Modifiers) -> 
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    for code in [button, button + 3]
+    for code in [code, modifier_bits + 3]
         .into_iter()
-        .take(if press_only { 1 } else { 2 })
+        .take(if release { 2 } else { 1 })
     {
         bytes.extend_from_slice(b"\x1b[M");
         bytes.push(32 + code);
@@ -253,6 +300,36 @@ mod tests {
         t.process(b"\r\n\r\n\r\n");
         t.scroll(1);
         assert!(click(&t, 4).is_empty());
+    }
+
+    #[test]
+    fn wheel_switches_between_scrollback_and_application_input() {
+        let mut t = Terminal::new(3, 20);
+        t.process(b"0\r\n1\r\n2\r\n3\r\n4\r\n5");
+        let hit = hit_test(t.screen(), 40, 20, 10, 20);
+        let mods = Modifiers::default();
+        assert!(wheel_input(&mut t, hit, 1, mods).is_empty());
+        assert_eq!(t.screen().scrollback(), 3);
+        t.process(b"\x1b[?1000h");
+        assert!(wheel_input(&mut t, hit, -1, mods).is_empty());
+        assert_eq!(t.screen().scrollback(), 0);
+        assert_eq!(wheel_input(&mut t, hit, -1, mods), b"\x1b[Ma%\"");
+
+        t.process(b"\x1b[?1049h\x1b[?1003;1006h");
+        assert_eq!(
+            wheel_input(&mut t, hit, 2, mods),
+            b"\x1b[<64;5;2M".repeat(2)
+        );
+        let ctrl = Modifiers {
+            control: true,
+            ..mods
+        };
+        assert_eq!(wheel_input(&mut t, hit, -1, ctrl), b"\x1b[<81;5;2M");
+        let padding = hit_test(t.screen(), -1, 20, 10, 20);
+        assert!(wheel_input(&mut t, padding, 1, mods).is_empty());
+        t.process(b"\x1b[?1003;1006l\x1b[?1049l");
+        assert!(wheel_input(&mut t, hit, 1, mods).is_empty());
+        assert_eq!(t.screen().scrollback(), 3);
     }
 
     fn find_text(state: &State, needle: &str) -> (u16, u16) {

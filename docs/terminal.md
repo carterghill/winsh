@@ -85,7 +85,8 @@ more tabs on either side. Drag the space beside the tabs to move the window.
 | Left click | Position the cursor in the current input line. Programs that request mouse input receive the click and choose where to place the cursor. |
 | Left drag | Highlight text across one or more rows, including in scrollback. Dragging leaves the editing cursor in place. |
 | Ctrl+Shift+C | Copy the highlighted text. With no selection, copy the visible screen. |
-| Mouse wheel or Shift+PageUp/PageDown | Browse up to 5,000 lines of scrollback. Typing returns to the live screen. |
+| Mouse wheel | Scroll inside programs that request mouse input, including full-screen Codex. At the shell prompt or while browsing terminal history, scroll three lines per notch. |
+| Shift+PageUp/PageDown | Browse up to 5,000 lines of terminal scrollback. Typing returns to the live screen. |
 | Resize window | Resize the grid and hosted console in every tab. |
 | `exit` | End the current shell and close its tab. |
 | Close window | End all sessions in the window. |
@@ -171,7 +172,7 @@ continues using the last valid settings.
 
 The terminal has no settings UI, search, hyperlinks, font zoom,
 graphics protocols, or saved sessions. Terminal mouse reporting covers left
-clicks. Drags select locally and the wheel browses terminal scrollback.
+clicks and vertical wheel events. Drags select locally.
 Font fallback and complex emoji shaping are limited by GDI. Width changes
 truncate or extend existing rows rather than reflowing old text. Scrollback
 has no scrollbar. This is a basic VT terminal, not full xterm compatibility.
